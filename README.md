@@ -84,3 +84,8 @@ The per-device BLE key + token are pulled with the
 Working end-to-end: BLE auth + weight capture (persistent connection), one-per-day
 history + trend on LittleFS, NTP timestamps, ST7789 touch UI, presence/night-mode,
 reject-validation gate, Google Sheet sync, and web OTA. Hardware bench-tested.
+
+## Built with AI
+
+This project — the protocol reverse-engineering, the firmware, the PC tools, and
+the docs — was developed with the help of AI coding tools (Claude / Claude Code).
