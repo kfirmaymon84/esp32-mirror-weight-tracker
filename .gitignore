@@ -1,0 +1,29 @@
+# ── Personal secrets (keys, tokens, MAC) ────────────────────────────────────
+esp32-mirror/src/secrets.h
+
+# ── PlatformIO build artifacts ──────────────────────────────────────────────
+esp32-mirror/.pio/
+.pio/
+
+# ── Device-generated data (your actual weight log) ──────────────────────────
+esp32-mirror/data/history.csv
+
+# ── Reverse-engineering captures (large + personal BLE/device data) ─────────
+captures/
+
+# ── Third-party tool: has its own upstream repo (see README) ────────────────
+pc-tools/Xiaomi-cloud-tokens-extractor/
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# ── OS / editor cruft ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp

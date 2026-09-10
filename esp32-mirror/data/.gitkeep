@@ -1,0 +1,2 @@
+# Keeps the LittleFS data/ folder in the repo.
+# history.csv here is device-generated and gitignored.

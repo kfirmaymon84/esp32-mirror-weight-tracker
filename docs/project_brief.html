@@ -1,0 +1,256 @@
+<title>Xiaomi S200 Scale Project</title>
+<style>
+  :root {
+    --bg:        #eef1f6;
+    --surface:   #ffffff;
+    --surface-2: #f5f7fb;
+    --border:    #d8deea;
+    --ink:       #141a26;
+    --ink-soft:  #454e60;
+    --ink-faint: #7b8395;
+    --accent:    #1f6fe0;
+    --accent-soft:#e6effd;
+    --good:      #17915a;
+    --good-soft: #e0f3ea;
+    --warn:      #b26a00;
+    --warn-soft: #fbeed6;
+    --mono: ui-monospace, "Cascadia Code", "Consolas", monospace;
+    --sans: system-ui, "Segoe UI", Roboto, -apple-system, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:        #0d111b;
+      --surface:   #151b28;
+      --surface-2: #1b2333;
+      --border:    #2a3446;
+      --ink:       #eef2f9;
+      --ink-soft:  #b3bccd;
+      --ink-faint: #7a8498;
+      --accent:    #5aa2ff;
+      --accent-soft:#16233b;
+      --good:      #3ecf8e;
+      --good-soft: #12291f;
+      --warn:      #e0a34a;
+      --warn-soft: #2a2213;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:        #0d111b;
+    --surface:   #151b28;
+    --surface-2: #1b2333;
+    --border:    #2a3446;
+    --ink:       #eef2f9;
+    --ink-soft:  #b3bccd;
+    --ink-faint: #7a8498;
+    --accent:    #5aa2ff;
+    --accent-soft:#16233b;
+    --good:      #3ecf8e;
+    --good-soft: #12291f;
+    --warn:      #e0a34a;
+    --warn-soft: #2a2213;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 32px 20px 72px;
+  }
+
+  header { margin-bottom: 8px; }
+  .eyebrow {
+    font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--accent); font-weight: 700; margin: 0 0 8px;
+  }
+  h1 {
+    font-size: clamp(28px, 7vw, 40px); line-height: 1.1; margin: 0 0 10px;
+    letter-spacing: -.02em; text-wrap: balance;
+  }
+  .lede { font-size: 17px; color: var(--ink-soft); margin: 0 0 20px; max-width: 60ch; }
+
+  .pills { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 28px; }
+  .pill {
+    font-size: 12.5px; font-weight: 600; padding: 5px 11px; border-radius: 999px;
+    display: inline-flex; align-items: center; gap: 6px; border: 1px solid transparent;
+  }
+  .pill.good { background: var(--good-soft); color: var(--good); border-color: color-mix(in srgb, var(--good) 30%, transparent); }
+  .pill.next { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+
+  section { margin-top: 30px; }
+  h2 {
+    font-size: 13px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--ink-faint); font-weight: 700; margin: 0 0 14px;
+    padding-bottom: 8px; border-bottom: 1px solid var(--border);
+  }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; padding: 18px 20px;
+  }
+  .card + .card { margin-top: 12px; }
+  p { margin: 0 0 12px; }
+  p:last-child { margin-bottom: 0; }
+
+  /* Journey steps */
+  ol.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+  ol.steps li {
+    display: grid; grid-template-columns: 26px 1fr; gap: 12px; align-items: start;
+    padding: 10px 0; border-bottom: 1px dashed var(--border);
+  }
+  ol.steps li:last-child { border-bottom: 0; }
+  .mark {
+    width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
+    font-size: 13px; font-weight: 700; flex-shrink: 0;
+  }
+  .mark.done { background: var(--good-soft); color: var(--good); }
+  .mark.now  { background: var(--accent-soft); color: var(--accent); }
+  .step-t { font-weight: 650; }
+  .step-d { color: var(--ink-soft); font-size: 14.5px; }
+
+  /* Facts */
+  dl.facts { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 8px 18px; }
+  dl.facts dt { color: var(--ink-faint); font-size: 14px; }
+  dl.facts dd { margin: 0; font-family: var(--mono); font-size: 14px; word-break: break-all; }
+
+  code {
+    font-family: var(--mono); font-size: .9em;
+    background: var(--surface-2); padding: 1px 5px; border-radius: 5px;
+    border: 1px solid var(--border);
+  }
+  pre {
+    font-family: var(--mono); font-size: 13px; line-height: 1.5;
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px; margin: 12px 0 0;
+    overflow-x: auto;
+  }
+  pre .c { color: var(--accent); }
+  .files { display: flex; flex-direction: column; gap: 10px; }
+  .file { display: grid; grid-template-columns: max-content 1fr; gap: 14px; align-items: baseline; }
+  .file .fn { font-family: var(--mono); font-size: 13.5px; color: var(--accent); font-weight: 600; white-space: nowrap; }
+  .file .fd { color: var(--ink-soft); font-size: 14.5px; }
+
+  ul.plain { margin: 0; padding-left: 18px; color: var(--ink-soft); }
+  ul.plain li { margin: 5px 0; }
+  ul.plain b { color: var(--ink); }
+
+  .note {
+    margin-top: 12px; font-size: 14px; color: var(--warn);
+    background: var(--warn-soft); border: 1px solid color-mix(in srgb, var(--warn) 28%, transparent);
+    border-radius: 10px; padding: 12px 14px;
+  }
+  footer { margin-top: 40px; color: var(--ink-faint); font-size: 13.5px; text-align: center; }
+  @media (max-width: 480px) {
+    dl.facts { grid-template-columns: 1fr; gap: 2px 0; }
+    dl.facts dt { margin-top: 8px; }
+    .file { grid-template-columns: 1fr; gap: 2px; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Hardware / BLE Reverse-Engineering</p>
+    <h1>Xiaomi S200 Scale → ESP32</h1>
+    <p class="lede">Reading live body-weight off a Xiaomi Smart Scale S200 over Bluetooth. The protocol is fully cracked and working on PC; next stop is a standalone ESP32 with a display.</p>
+    <div class="pills">
+      <span class="pill good"><span class="dot"></span>Protocol solved</span>
+      <span class="pill good"><span class="dot"></span>Working PC reader + live GUI</span>
+      <span class="pill next"><span class="dot"></span>Next: ESP32 port</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>What this is</h2>
+    <div class="card">
+      <p>The S200 keeps weight <b>off its BLE broadcast entirely</b> — the advertisement is just an idle beacon. The number is delivered only over an <b>authenticated, encrypted GATT session</b> (Xiaomi's MIoT / “mible” protocol). We captured the phone app talking to the scale, reverse-engineered the handshake and data format, and now read live weight from a plain PC. The end goal is an ESP32 that does the same on its own and shows the weight on a screen.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>How we got here</h2>
+    <div class="card">
+      <ol class="steps">
+        <li><span class="mark done">✓</span><span><span class="step-t">Caught the broadcast</span><br><span class="step-d">Found the scale over BLE and decoded its MiBeacon frame — confirmed weight is <em>not</em> broadcast.</span></span></li>
+        <li><span class="mark done">✓</span><span><span class="step-t">Pulled the bind key + token</span><br><span class="step-d">Extracted per-device secrets from the Mi cloud account with the Xiaomi token extractor.</span></span></li>
+        <li><span class="mark done">✓</span><span><span class="step-t">Sniffed the Mi Home app</span><br><span class="step-d">Android HCI snoop log via <code>adb bugreport</code>, decoded the GATT traffic → mapped the full auth + data protocol.</span></span></li>
+        <li><span class="mark done">✓</span><span><span class="step-t">Working PC reader</span><br><span class="step-d">Authenticates, derives session keys, decrypts the weight stream. Verified against a real 104.20&nbsp;kg weigh-in.</span></span></li>
+        <li><span class="mark done">✓</span><span><span class="step-t">Live desktop app</span><br><span class="step-d">A window that shows the number in real time — blue while settling, green when it locks.</span></span></li>
+        <li><span class="mark now">→</span><span><span class="step-t">ESP32 + display (in design)</span><br><span class="step-d">Re-implement the reader on-device and drive a screen. Architecture being decided.</span></span></li>
+      </ol>
+    </div>
+  </section>
+
+  <section>
+    <h2>The device</h2>
+    <div class="card">
+      <dl class="facts">
+        <dt>Name</dt><dd>Xiaomi Smart Scale S200</dd>
+        <dt>Model</dt><dd>xiaomi.scales.ms111 (Yunmai OEM)</dd>
+        <dt>MAC</dt><dd>D0:7B:6F:91:88:E8</dd>
+        <dt>MCU</dt><dd>Nordic nRF52840</dd>
+        <dt>Service</dt><dd>0xFE95 (Xiaomi MIoT)</dd>
+        <dt>Secrets</dt><dd>bind key + 12-byte token (held privately, not shown)</dd>
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <h2>How weight is read</h2>
+    <div class="card">
+      <p>A GATT client connects, runs the Mi handshake, then decrypts a small streamed record. The core:</p>
+      <pre><span class="c"># session-key derivation (token-based)</span>
+salt    = random_key(16) + remote_key(16)
+derived = HKDF-SHA256(mi_token, salt, "mible-login-info", 64)
+dev_key, app_key = derived[0:16], derived[16:32]
+dev_iv,  app_iv  = derived[32:36], derived[36:40]
+
+<span class="c"># verify device, then send our proof</span>
+server_proof == HMAC-SHA256(dev_key, remote_key + random_key)
+client_info  =  HMAC-SHA256(app_key, random_key + remote_key)
+
+<span class="c"># data channel: AES-CCM, tag=4</span>
+nonce = iv(4) + 0x00*4 + seq(4, LE)
+
+<span class="c"># weight frames (decrypted)</span>
+0x19  intermediate  → uint16 LE @ off 23, / 100 = kg
+0x22  stable/final  → CSV after 0xA0: id,user,weight_10g,imped,ts</pre>
+      <p style="margin-top:14px">Transport runs over four <code>0xFE95</code> characteristics — an auth channel, an encrypted send channel, an encrypted receive channel, and a device-info channel — with a small framed reliable-transfer layer (ready / ok / ack).</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>The code (on the PC)</h2>
+    <div class="card files">
+      <div class="file"><span class="fn">gatt_mi.py</span><span class="fd">The reader — Mi auth, key derivation, AES-CCM decrypt, weight parsing. This is the reference for the ESP32 port.</span></div>
+      <div class="file"><span class="fn">scale_app.py</span><span class="fd">Live desktop GUI; wraps the reader and shows the big real-time number.</span></div>
+      <div class="file"><span class="fn">btsnoop_parse.py</span><span class="fd">Decodes the Android HCI capture into readable GATT operations.</span></div>
+      <div class="file"><span class="fn">xiaomi_scan.py</span><span class="fd">Xiaomi-only BLE scanner used to find the scale in the first place.</span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Next: ESP32 architecture</h2>
+    <div class="card">
+      <p>Porting the reader on-device. Open decisions to settle before building:</p>
+      <ul class="plain">
+        <li><b>Board</b> — ESP32 / S3 / C3? (S3 has the most headroom for a display + LVGL.)</li>
+        <li><b>Display</b> — type, size, driver (e.g. ILI9341 TFT, SSD1306 OLED, e-paper).</li>
+        <li><b>Output</b> — screen only, or also push out over Wi-Fi (MQTT / HTTP / Home Assistant)?</li>
+        <li><b>Framework</b> — Arduino or ESP-IDF. Either way the port needs <b>NimBLE</b> (BLE client) + <b>mbedTLS</b> (HKDF-SHA256, HMAC-SHA256, AES-CCM).</li>
+      </ul>
+      <div class="note">Note: the scale accepts one BLE connection at a time. When the ESP32 is connected, keep the phone's Mi Home app closed/away, and vice-versa.</div>
+    </div>
+  </section>
+
+  <footer>
+    Project brief · continue the discussion by pasting this into a chat on any device.
+  </footer>
+</div>
