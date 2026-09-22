@@ -13,7 +13,6 @@ and reimplemented here on the ESP32.
 ```
 esp32-mirror/   ESP32 firmware (PlatformIO) — the product
 pc-tools/       Python tools used to crack the protocol + a desktop reader
-garmin-sync/    Optional: push weigh-ins from the sheet to Garmin Connect
 docs/           Spec, wiring list, apps-script, project brief
 captures/       Raw reverse-engineering artifacts (local only, gitignored)
 ```

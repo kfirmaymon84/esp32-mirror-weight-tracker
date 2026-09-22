@@ -1,10 +1,6 @@
 # ── Personal secrets (keys, tokens, MAC) ────────────────────────────────────
 esp32-mirror/src/secrets.h
 
-# ── Garmin sync: local credentials + sync state ─────────────────────────────
-garmin-sync/garmin.env
-garmin-sync/.sync_state.json
-
 # ── PlatformIO build artifacts ──────────────────────────────────────────────
 esp32-mirror/.pio/
 .pio/
