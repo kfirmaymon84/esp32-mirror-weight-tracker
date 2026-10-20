@@ -5,6 +5,7 @@
 #include <WiFiManager.h>
 #include <esp_wifi.h>
 
+#include "cloud.h"
 #include "config.h"
 
 static std::function<void(const char *, const char *)> portalCb;
@@ -51,7 +52,17 @@ bool timeSyncAtBoot(bool forcePortal) {
   bool connected = false;
   if (forcePortal || !haveCreds) {
     // First-time setup or a forced re-provision: open the captive portal.
+    // Besides WiFi, each user can enter their OWN Google Sheet here (optional;
+    // empty = the device runs offline). Prefilled with the current values.
     WiFiManager wm;
+    WiFiManagerParameter hint("<p>Optional: your own Google Sheet sync. "
+                              "Leave empty to keep data on the device only.</p>");
+    WiFiManagerParameter pUrl("cloudurl", "Google Sheet script URL (/exec)",
+                              cloudUrl(), 220);
+    WiFiManagerParameter pTok("cloudtok", "Sheet token", cloudToken(), 48);
+    wm.addParameter(&hint);
+    wm.addParameter(&pUrl);
+    wm.addParameter(&pTok);
     wm.setConfigPortalTimeout(180);
     wm.setAPCallback([](WiFiManager *w) {
       Serial.printf("[wifi] setup portal: join '%s' then browse 192.168.4.1\n",
@@ -59,10 +70,11 @@ bool timeSyncAtBoot(bool forcePortal) {
       if (portalCb) portalCb(WIFI_AP_NAME, "192.168.4.1");
     });
     if (forcePortal) {
-      Serial.println("[wifi] forced re-provision (encoder held at boot)");
+      Serial.println("[wifi] forced re-provision (screen held at boot)");
       wm.resetSettings();
     }
     connected = wm.autoConnect(WIFI_AP_NAME);
+    if (connected) cloudSetConfig(pUrl.getValue(), pTok.getValue());
   } else {
     // Have creds: just try to connect. If the network is temporarily down we
     // do NOT open the portal — we boot without a clock and retry on next sync.

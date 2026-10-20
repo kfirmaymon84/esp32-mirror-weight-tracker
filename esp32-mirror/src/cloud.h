@@ -4,8 +4,17 @@
 // Google Sheet sync via a Google Apps Script web app.
 // Readings are queued to LittleFS so nothing is lost when offline; the queue is
 // flushed (WiFi up → POST → WiFi off) at a safe time when BLE is idle.
+//
+// The sheet is a PER-DEVICE setting (NVS), entered by each user on the WiFi
+// setup page — nothing is compiled in, so a unit never reaches someone else's
+// sheet. Empty URL = cloud off: the device works fully offline (readings are
+// still queued locally and flush if a sheet is added later).
 
-void cloudBegin();
+void cloudBegin();                         // load the sheet config from NVS
+void cloudSetConfig(const char *url, const char *token);  // trim + persist
+bool cloudConfigured();                    // a sheet URL is set
+const char *cloudUrl();
+const char *cloudToken();
 void cloudQueue(uint32_t ts, float kg);   // add a reading to the pending queue
 bool cloudHasPending();                    // any unsynced readings?
 int  cloudPendingCount();

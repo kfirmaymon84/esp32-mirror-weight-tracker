@@ -2,35 +2,19 @@
 #include <stdint.h>
 
 // Bump this to visibly confirm a firmware update (printed at boot).
-#define FW_VERSION "2"
+#define FW_VERSION "3"
+
+// Hardware profile (pins, screen size, calibration) for the selected board.
+#include "board.h"
 
 // ── Secrets (personal, gitignored) ──────────────────────────────────────────
 // SCALE_MAC, MI_TOKEN, CLOUD_URL, CLOUD_TOKEN live in secrets.h.
 // Copy secrets.example.h -> secrets.h and fill in your own values.
 #include "secrets.h"
 
-// ── User profile (sent to the scale during setup; body-comp uses these) ─────
-// Weight readout does not depend on these being exact.
-#define USER_HEIGHT_CM 177
-#define USER_AGE       33
-#define USER_SEX       1   // 1 = male, 0 = female
-
-// How long to keep the session open after auth, listening for a stable weight.
-#define SESSION_STREAM_MS 30000
-
-// ── Pin map (ESP32 DevKit v4 / WROOM-32E) ───────────────────────────────────
-// TFT (ST7789V 240x320 + XPT2046 touch, SPI) pins are set via TFT_eSPI build
-// flags in platformio.ini; mirrored here for reference:
-//   SCLK=18  MOSI=23  MISO=19  CS=5  DC=16  RST=17  BL=32  TOUCH_CS=4
-// Full wiring: docs/wiring.md
-#define PIN_TFT_BL   32
-
-#define PIN_I2C_SDA  21
-#define PIN_I2C_SCL  22
-
-// Rotary encoder removed (touch-only). GPIO 25/26/27 are free.
-
-#define PIN_BUZZER   33
+// ── Scale (OKOK / Chipsea BLE broadcast) ────────────────────────────────────
+// Pins live in board.h. The scale needs no keys: the firmware listens for its
+// advertisement and learns the first scale's MAC (Settings → Scale forgets it).
 
 // ── Presence detection (VL53L0X) ────────────────────────────────────────────
 #define PRESENCE_MM      900   // closer than this = someone is here
@@ -49,7 +33,7 @@
 #define DISPLAY_TIMEOUT_MS 15000        // dim off after this with no presence/activity
 #define NIGHT_START_MIN   (23 * 60 + 30) // 23:30 — quiet hours begin
 #define NIGHT_END_MIN     (6 * 60)       // 06:00 — quiet hours end
-// During quiet hours the ToF does NOT wake the display; the encoder always does.
+// During quiet hours the ToF does NOT wake the display; a touch always does.
 
 // ── WiFi ─────────────────────────────────────────────────────────────────────
 // Credentials are provisioned via WiFiManager's captive portal (no hardcoding).

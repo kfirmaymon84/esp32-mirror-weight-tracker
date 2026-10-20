@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <HTTPClient.h>
 #include <LittleFS.h>
+#include <Preferences.h>
 #include <WiFiClientSecure.h>
 
 #include "config.h"
@@ -12,9 +13,45 @@
 // Pending queue: append-only CSV of readings not yet synced ("ts,kg").
 static const char *PENDING_FILE = "/pending.csv";
 
-void cloudBegin() {
-  // LittleFS is already mounted by historyBegin(); nothing else needed.
+// Per-device sheet config (NVS namespace "cloud").
+static String s_url, s_token;
+static bool s_loaded = false;
+
+static void loadConfig() {
+  if (s_loaded) return;
+  Preferences p;
+  p.begin("cloud", true);
+  s_url = p.getString("url", "");
+  s_token = p.getString("tok", "");
+  p.end();
+  s_loaded = true;
 }
+
+void cloudBegin() {
+  // LittleFS is mounted by historyBegin(); here we only load the sheet config.
+  loadConfig();
+  Serial.printf("[cloud] %s\n", s_url.length() ? "sheet configured" : "off (no sheet set)");
+}
+
+void cloudSetConfig(const char *url, const char *token) {
+  String u = url ? url : "", t = token ? token : "";
+  u.trim();
+  t.trim();
+  if (!u.startsWith("http")) u = "";          // anything else = cloud off
+  Preferences p;
+  p.begin("cloud", false);
+  p.putString("url", u);
+  p.putString("tok", t);
+  p.end();
+  s_url = u;
+  s_token = t;
+  s_loaded = true;
+  Serial.printf("[cloud] config saved: %s\n", u.length() ? "sheet set" : "offline");
+}
+
+bool cloudConfigured() { loadConfig(); return s_url.length() > 0; }
+const char *cloudUrl() { loadConfig(); return s_url.c_str(); }
+const char *cloudToken() { loadConfig(); return s_token.c_str(); }
 
 void cloudQueue(uint32_t ts, float kg) {
   File f = LittleFS.open(PENDING_FILE, "a");
@@ -43,7 +80,8 @@ int cloudPendingCount() {
   return n;
 }
 
-bool cloudHasPending() { return cloudPendingCount() > 0; }
+// Nothing to send while no sheet is configured (readings stay queued locally).
+bool cloudHasPending() { return cloudConfigured() && cloudPendingCount() > 0; }
 
 // POST one reading. Returns true on HTTP 200.
 static bool postReading(uint32_t ts, float kg) {
@@ -55,12 +93,12 @@ static bool postReading(uint32_t ts, float kg) {
   // which we'd misread as failure and retry → duplicate rows. The 302 IS success.
   http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
   http.setTimeout(12000);
-  if (!http.begin(client, CLOUD_URL)) return false;
+  if (!http.begin(client, s_url)) return false;
   http.addHeader("Content-Type", "application/json");
 
-  char body[96];
+  char body[128];
   snprintf(body, sizeof(body), "{\"token\":\"%s\",\"ts\":%u,\"kg\":%.2f}",
-           CLOUD_TOKEN, (unsigned)ts, kg);
+           s_token.c_str(), (unsigned)ts, kg);
   int code = http.POST((uint8_t *)body, strlen(body));
   http.end();
   Serial.printf("[cloud] POST %.2f -> HTTP %d\n", kg, code);
@@ -125,6 +163,10 @@ int cloudFlush() {
 }
 
 int cloudPull() {
+  if (!cloudConfigured()) {
+    Serial.println("[cloud] pull: no sheet configured");
+    return -1;
+  }
   if (!wifiConnect(12000)) {
     Serial.println("[cloud] pull: WiFi unavailable");
     wifiOff();
@@ -135,7 +177,7 @@ int cloudPull() {
   HTTPClient http;
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);  // GET → 302 → googleusercontent
   http.setTimeout(15000);
-  String url = String(CLOUD_URL) + "?token=" + CLOUD_TOKEN;
+  String url = s_url + "?token=" + s_token;
   if (!http.begin(client, url)) {
     wifiOff();
     return -1;
