@@ -9,6 +9,9 @@
 #include "config.h"
 
 static std::function<void(const char *, const char *)> portalCb;
+static char savedSsid[33] = "";
+
+const char *wifiSavedSsid() { return savedSsid; }
 
 void setWifiPortalCallback(std::function<void(const char *, const char *)> cb) {
   portalCb = cb;
@@ -48,6 +51,7 @@ bool timeSyncAtBoot(bool forcePortal) {
   bool haveCreds = false;
   if (esp_wifi_get_config(WIFI_IF_STA, &conf) == ESP_OK)
     haveCreds = strlen((const char *)conf.sta.ssid) > 0;
+  strlcpy(savedSsid, (const char *)conf.sta.ssid, sizeof(savedSsid));
 
   bool connected = false;
   if (forcePortal || !haveCreds) {
@@ -74,7 +78,10 @@ bool timeSyncAtBoot(bool forcePortal) {
       wm.resetSettings();
     }
     connected = wm.autoConnect(WIFI_AP_NAME);
-    if (connected) cloudSetConfig(pUrl.getValue(), pTok.getValue());
+    if (connected) {
+      cloudSetConfig(pUrl.getValue(), pTok.getValue());
+      strlcpy(savedSsid, WiFi.SSID().c_str(), sizeof(savedSsid));
+    }
   } else {
     // Have creds: just try to connect. If the network is temporarily down we
     // do NOT open the portal — we boot without a clock and retry on next sync.

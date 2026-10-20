@@ -2,7 +2,7 @@
 #include <stdint.h>
 
 // Bump this to visibly confirm a firmware update (printed at boot).
-#define FW_VERSION "3"
+#define FW_VERSION "4"
 
 // Hardware profile (pins, screen size, calibration) for the selected board.
 #include "board.h"
@@ -29,6 +29,13 @@
 #define VALIDATE_CAP_PCT        0.10f   // never wider than ±10% of baseline
 #define REJECT_CONFIRM_MS       20000   // window to force-accept a rejected reading
 
+// ── UI palette ──────────────────────────────────────────────────────────────
+// 1 = high-contrast "gloss" palette (readable through glossy mirror film),
+// 0 = the original Halo style-guide colours.
+#ifndef UI_GLOSS_PALETTE
+#define UI_GLOSS_PALETTE 1
+#endif
+
 // ── Display wake / night mode ────────────────────────────────────────────────
 #define DISPLAY_TIMEOUT_MS 15000        // dim off after this with no presence/activity
 #define NIGHT_START_MIN   (23 * 60 + 30) // 23:30 — quiet hours begin
@@ -44,9 +51,10 @@
 #define TZ_INFO       "IST-2IDT,M3.4.4/26,M10.5.0"
 
 // ── History / trend ─────────────────────────────────────────────────────────
-#define HISTORY_MAX      120   // readings kept in RAM (flash log keeps all)
+#define HISTORY_MAX      400   // readings kept in RAM (> 1 year at one per day)
 #define TREND_WINDOW     7     // moving-average window for trend
 #define TREND_UP_KG      0.5f  // above avg by this → "trending up"
+#define TREND_ALPHA      0.1f  // EWMA trend: daily pull toward the reading (Trends/Home)
 
 // ── Cloud sync (Google Apps Script web app) ─────────────────────────────────
 // CLOUD_URL and CLOUD_TOKEN live in secrets.h (gitignored). See secrets.example.h.
