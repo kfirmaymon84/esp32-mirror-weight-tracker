@@ -52,14 +52,23 @@ Environments:
 Source:
 - `src/mi_scale.*`  — BLE client + Mi auth + weight decode (core 0 task)
 - `src/mi_crypto.*` — HKDF / HMAC-SHA256 / AES-CCM (mbedTLS)
-- `src/history.*`   — LittleFS log, one reading per day
+- `src/history.*`   — LittleFS log, one reading per day; EWMA trend + streak
 - `src/timekeeper.*`— WiFiManager provisioning + NTP time
 - `src/cloud.*`     — Google Sheet sync (queue + flush/pull)
 - `src/main.cpp`    — touch UI + state machine (core 1)
+- `src/halo_fonts.h`— generated smooth fonts (Outfit + Inter), see `pc-tools/make_fonts.py`
 - `src/config.h`    — pins, WiFi, thresholds  ·  `src/secrets.h` — personal keys
 
-On-device UI: bottom tab bar (**Weight · Graph · Setup**). Setup includes touch
-calibration, units, buzzer, goal, cloud sync, WiFi reset, and web-based OTA.
+On-device UI ("Halo"): black ground (the mirror), one mint accent, amber for
+attention, anti-aliased fonts. A left icon rail switches **Home · Trends · Settings**.
+Home (the resting screen) shows the latest weight inside a goal-progress ring, the
+week's trend change, goal, streak and a 30-day sparkline. Stepping on the scale
+opens a full-screen Measuring view, then a 30 s Result (vs yesterday / 7-day
+average); an out-of-range reading asks "Is this you?" for 20 s. Trends plots the
+EWMA trend over raw readings (30D / 90D / 1Y / All). Settings: Google Sheet sync,
+units, sound, goal, touch calibration, scale pairing, web-based OTA, Wi-Fi reset.
+During quiet hours a touch shows a dim, warm night glance. The Wi-Fi setup
+portal shows a QR code that joins the setup network.
 
 ## PC tools — `pc-tools/`
 

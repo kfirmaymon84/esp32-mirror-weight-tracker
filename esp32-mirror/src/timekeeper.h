@@ -15,6 +15,7 @@ time_t nowEpoch();      // current epoch seconds (0-ish if never synced)
 // Connect, do work, then wifiOff() to free the radio for BLE.
 bool wifiConnect(uint32_t timeoutMs);
 void wifiOff();
+const char *wifiSavedSsid();   // network saved by the setup portal ("" if none)
 
 // If the clock isn't set yet and WiFi is up, kick an NTP sync (up to waitMs).
 // Lets a later cloud sync backfill the time when boot had no network.

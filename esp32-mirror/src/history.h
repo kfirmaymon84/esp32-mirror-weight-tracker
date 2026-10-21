@@ -26,3 +26,31 @@ float historyAvg(int n, bool skipLast);
 // Classify newest vs the trailing average that preceded it.
 Trend historyTrend();
 const char *trendText(Trend t);
+
+// ── Trend weight (EWMA) ─────────────────────────────────────────────────────
+// Time-aware exponential moving average of the readings (Hacker's Diet style:
+// each day pulls the trend TREND_ALPHA of the way toward that day's weight), so
+// day-to-day water noise is smoothed out. Recomputed whenever readings change.
+float historyTrendAt(int i);         // trend value at reading i (0 = oldest)
+float historyTrendLast();            // current trend weight (NAN if no readings)
+// Trend as it stood `days` days before `now` (the last reading at or before
+// that moment). NAN if there is no reading that old.
+float historyTrendDaysAgo(int days, uint32_t now);
+
+// ── Calendar days (local time) ──────────────────────────────────────────────
+long historyDay(uint32_t ts);        // local calendar day number (-1 if unclocked)
+// Consecutive days with a weigh-in, ending today — or yesterday, so a streak
+// isn't shown as broken before today's weigh-in has happened.
+int historyStreak(uint32_t now);
+// Bit i set = weighed in on day (today - 6 + i); bit 6 = today.
+uint8_t historyWeekMask(uint32_t now);
+// Mean of the readings from the `days` calendar days before today (today itself
+// excluded). NAN if there are none.
+float historyAvgPrevDays(int days, uint32_t now);
+
+// ── Demo data (dev: serial 'f' / 'r') ───────────────────────────────────────
+// Back the real log up to /history.real.csv, then write ~4 months of made-up
+// daily readings ending at the real ones (local only, never sent to the sheet).
+// Returns the number of demo readings added (0 if the clock isn't set).
+int historySeedDemo(uint32_t now);
+bool historyRestoreReal();           // put the backed-up real log back
