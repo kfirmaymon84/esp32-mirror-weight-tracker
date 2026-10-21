@@ -973,8 +973,10 @@ void setup() {
   delay(60);
   bool forcePortal = (tft.getTouchRawZ() > 600);
 
-  batV = batteryVolts();
-  batPct = batteryPercent(batV);
+  if (batteryAvailable()) {      // boards without a gauge keep batPct = -1 (icon hidden)
+    batV = batteryVolts();
+    batPct = batteryPercent(batV);
+  }
   setStatus("Syncing time");
   drawTopBar();
   drawToday(true);
@@ -1136,7 +1138,7 @@ void loop() {
   }
 
   // Battery every 10 s.
-  if (millis() - lastBat > 10000) {
+  if (batteryAvailable() && millis() - lastBat > 10000) {
     lastBat = millis();
     batV = batteryVolts();
     int p = batteryPercent(batV);

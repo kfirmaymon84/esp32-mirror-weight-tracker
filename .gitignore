@@ -27,3 +27,9 @@ env/
 Thumbs.db
 .vscode/
 *.swp
+
+# ── Enclosure build outputs ──────────────────────────────────────────────────
+enclosure/out/assembly_preview.step
+enclosure/out/_*.stl
+enclosure/__pycache__/
+enclosure/out/E32R40T_board_*.step

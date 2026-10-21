@@ -6,11 +6,15 @@
 
 static float s_volts = -1;   // exponential moving average
 
+bool batteryAvailable() { return PIN_BAT_ADC >= 0; }
+
 void batteryBegin() {
+  if (!batteryAvailable()) return;
   analogSetPinAttenuation(PIN_BAT_ADC, ADC_11db);   // full ~0-3.1 V range
 }
 
 float batteryVolts() {
+  if (!batteryAvailable()) return -1;
   uint32_t sum = 0;
   for (int i = 0; i < 16; i++) sum += analogReadMilliVolts(PIN_BAT_ADC);
   float v = (sum / 16.0f) * BAT_DIVIDER / 1000.0f;
@@ -19,6 +23,7 @@ float batteryVolts() {
 }
 
 int batteryPercent(float v) {
+  if (!batteryAvailable()) return -1;               // no gauge: UI hides the icon
   static const float V[] = {3.27f, 3.61f, 3.69f, 3.73f, 3.77f, 3.80f, 3.84f,
                             3.87f, 3.91f, 3.95f, 4.02f, 4.08f, 4.15f, 4.20f};
   static const int P[] = {0, 5, 10, 20, 30, 40, 50, 60, 65, 70, 80, 85, 95, 100};

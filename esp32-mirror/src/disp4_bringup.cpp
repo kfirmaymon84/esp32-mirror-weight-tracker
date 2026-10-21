@@ -35,7 +35,16 @@ static const int PIN_BAT_ADC = 34;
 static const int AUDIO_CH = 0;         // LEDC channel for the speaker tone
 
 // Touch calibration captured 2026-10-20 for rotation 1 (user-confirmed accurate).
-static uint16_t calData[5] = { 278, 3660, 204, 3646, 7 };
+// Same sketch serves both LCDWiki boards (identical pinout); -D BRINGUP_35 = 3.5".
+#if defined(BRINGUP_35)
+#define BOARD_TAG "E32R35T 3.5in"
+static uint16_t calData[5] = { 300, 3600, 300, 3600, 7 };  // placeholder: calibrated at boot
+static const bool CAL_AT_BOOT = true;
+#else
+#define BOARD_TAG "E32R40T 4.0in"
+static uint16_t calData[5] = { 278, 3660, 204, 3646, 7 };  // user-confirmed 2026-10-20
+static const bool CAL_AT_BOOT = false;
+#endif
 
 // Button row geometry (landscape 480x320).
 static const int BTN_Y = 250, BTN_H = 56, BTN_W = 140;
@@ -201,7 +210,7 @@ static void draw() {
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("E32R40T test", 10, 72, 4);
+  tft.drawString(BOARD_TAG " test", 10, 72, 4);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Tap a button. Plug a speaker into SPEAKER for BEEP.", 10, 110, 2);
   tft.drawString("Touch anywhere else draws a dot.", 10, 128, 2);
@@ -224,7 +233,7 @@ static void runCalibration() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\n=== 4in E32R40T peripheral bring-up ===");
+  Serial.println("\n=== " BOARD_TAG " peripheral bring-up ===");
 
   pinMode(PIN_LED_R, OUTPUT);
   pinMode(PIN_LED_G, OUTPUT);
@@ -251,6 +260,7 @@ void setup() {
   digitalWrite(27, HIGH);                  // backlight on
   tft.setRotation(1);                      // landscape 480x320
   tft.setTouch(calData);
+  if (CAL_AT_BOOT) runCalibration();       // new panel: calibrate before anything else
   draw();
   chime();                                 // boot chime (if a speaker is fitted)
   Serial.println("Ready. Tap BEEP / RGB / CAL.");
