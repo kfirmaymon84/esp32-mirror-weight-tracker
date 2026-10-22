@@ -45,6 +45,10 @@ void ntpEnsure(uint32_t waitMs) {
 }
 
 bool timeSyncAtBoot(bool forcePortal) {
+  // Local time zone even if NTP never runs (calendar days, the trend's per-day math).
+  setenv("TZ", TZ_INFO, 1);
+  tzset();
+
   // Do we already have saved WiFi credentials in NVS?
   WiFi.mode(WIFI_STA);
   wifi_config_t conf = {};

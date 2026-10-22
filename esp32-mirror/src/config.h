@@ -56,5 +56,17 @@
 #define TREND_UP_KG      0.5f  // above avg by this → "trending up"
 #define TREND_ALPHA      0.1f  // EWMA trend: daily pull toward the reading (Trends/Home)
 
+// ── Xiaomi S200 user profile (personal -D SCALE_S200 builds only) ───────────
+// Sent during the S200's session setup; the weight readout does not depend on it.
+#ifndef USER_HEIGHT_CM
+#define USER_HEIGHT_CM 177
+#endif
+#ifndef USER_AGE
+#define USER_AGE       33
+#endif
+#ifndef USER_SEX
+#define USER_SEX       1   // 1 = male, 0 = female
+#endif
+
 // ── Cloud sync (Google Apps Script web app) ─────────────────────────────────
 // CLOUD_URL and CLOUD_TOKEN live in secrets.h (gitignored). See secrets.example.h.

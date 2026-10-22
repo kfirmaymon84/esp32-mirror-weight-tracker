@@ -1,16 +1,16 @@
 # Enclosure — 4" Smart Mirror (E32R40T)
 
 3D-printable case for the LCDWiki **E32R40T** board (ESP32-32E + 4.0" ST7796S
-480×320 + resistive touch), with room for a **50×34×10 mm LiPo**, a **16×9×4 mm
-speaker** and a **GY-530 (VL53L0X) ToF** module. Hangs on the wall *or* stands on
-a shelf with the included stand.
+480×320 + resistive touch), with room for a **16×9×4 mm speaker** and a **GY-530
+(VL53L0X) ToF** module. Powered over USB-C (no battery). Hangs on the wall *or*
+stands on a shelf with the included stand.
 
 Outer size: **123.2 × 93.8 × 24.3 mm**.
 
 | File (in `out/`) | What |
 |---|---|
 | `front_shell.stl` / `.step` | Frame + walls. Display window, ToF window (top), speaker grille (bottom), USB-C opening (right side), 4 PCB posts, 4 corner pillars |
-| `back_cover.stl` / `.step` | Back plate — **snaps in, no screws** (4 hooks + 2 locating tabs). Battery cradle, 2 wall keyholes with closed hoods, BOOT/RESET pin holes, pry notch |
+| `back_cover.stl` / `.step` | Back plate — **snaps in, no screws** (4 hooks + 2 locating tabs). 2 wall keyholes with closed hoods, BOOT/RESET pin holes, pry notch |
 | `stand.stl` / `.step` | Desk stand. Two pegs drop into the keyholes; device leans back 15° |
 | `preview_*.png` | Rendered previews |
 
@@ -41,7 +41,6 @@ PETG recommended (bathroom warmth/humidity); PLA is fine for a dry room.
 |---|---|---|
 | 4 | M3 × 6 pan-head (self-tapping into plastic, or with M3 heat-set inserts) | board → front-shell posts |
 | — | hot glue | holds ToF module and speaker in their pockets |
-| — | foam tape (~1–2 mm) | under the battery |
 | 2 | wall screws, head Ø < 8.5 mm, shank Ø < 4.2 mm, **70 mm apart, level** | wall mounting |
 
 ## Assembly
@@ -55,9 +54,7 @@ PETG recommended (bathroom warmth/humidity); PLA is fine for a dry room.
 3. **Board:** lay it face-down into the front shell (USB-C toward the side opening) so
    the 4 holes sit on the 4 posts, and fit the 4 × M3×6 screws. The posts hold the glass
    **0.4 mm clear of the bezel**, so the touch layer is never pressed.
-4. **Battery:** stick it into the back-cover cradle with foam tape; the gap in the cradle
-   wall faces the **BAT** socket. Plug it in.
-5. **Close:** line the cover up (the side tabs centre it) and press it in until all four
+4. **Close:** line the cover up (the side tabs centre it) and press it in until all four
    hooks click. No screws.
 
 **Opening:** put a coin or fingernail in the pry notch at the bottom seam and lift; the

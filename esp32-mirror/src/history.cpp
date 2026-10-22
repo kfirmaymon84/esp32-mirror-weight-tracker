@@ -27,22 +27,29 @@ static Reading ringGet(int i) {  // i: 0=oldest
   return ring[idx];
 }
 
+// Readings on the same local day count as ONE day: the trend moves from where
+// it stood at the end of the previous day toward this day's running mean, so a
+// re-weigh (or a burst of readings) doesn't pull it several days' worth.
 static void computeTrend() {
-  float t = 0;
-  uint32_t prevTs = 0;
+  float t = 0, base = 0, pull = 1, sum = 0;
+  int nDay = 0;
+  long prevDay = -1;
   for (int i = 0; i < count; i++) {
     Reading r = ringGet(i);
-    if (i == 0) {
-      t = r.kg;
+    long day = historyDay(r.ts);                 // -1 if unclocked
+    if (i > 0 && day >= 0 && day == prevDay) {
+      sum += r.kg;
+      nDay++;
     } else {
-      float days = 1;
-      if (r.ts > 1700000000UL && prevTs > 1700000000UL && r.ts > prevTs)
-        days = (r.ts - prevTs) / 86400.0f;
-      if (days < 1) days = 1;
-      t += (1.0f - powf(1.0f - TREND_ALPHA, days)) * (r.kg - t);
+      float days = (i > 0 && day >= 0 && prevDay >= 0) ? (float)(day - prevDay) : 1;
+      base = (i == 0) ? r.kg : t;
+      pull = (i == 0) ? 1 : 1.0f - powf(1.0f - TREND_ALPHA, days);
+      sum = r.kg;
+      nDay = 1;
     }
+    t = base + pull * (sum / nDay - base);
     trend[i] = t;
-    prevTs = r.ts;
+    prevDay = day;
   }
 }
 
@@ -106,7 +113,25 @@ static void rewriteFile() {
   f.close();
 }
 
+// When the latest reading was taken without a clock (ts 0) during THIS boot:
+// millis() at that moment, so it can be dated once NTP sets the clock.
+static uint32_t s_unclockedMs = 0;
+
+void historyDateUnclocked(uint32_t now) {
+  if (!s_unclockedMs || now < 1700000000UL || !count) return;
+  int idx = (count < HISTORY_MAX) ? (count - 1) : ((head + count - 1) % HISTORY_MAX);
+  if (ring[idx].ts == 0) {
+    ring[idx].ts = now - (millis() - s_unclockedMs) / 1000;
+    rewriteFile();
+    computeTrend();
+    Serial.printf("[hist] dated the unclocked reading %.2f kg @ %u\n", ring[idx].kg,
+                  (unsigned)ring[idx].ts);
+  }
+  s_unclockedMs = 0;
+}
+
 void historyAdd(uint32_t ts, float kg) {
+  s_unclockedMs = ts ? 0 : (millis() ? millis() : 1);
   // One reading per day: a same-day weigh-in replaces the day's entry, keeping
   // only the latest. When the clock isn't set (ts==0) we can't tell days apart,
   // so consecutive unclocked readings also collapse onto the last one.

@@ -2,15 +2,16 @@
 // BLE scale listener on core 0 (passive scan); UI on core 1.
 //
 // Hardware: per-board profile in board.h (currently the 4" E32R40T: ST7796S
-// 480x320 + XPT2046 touch, speaker amp, RGB LED, battery gauge, ToF on I2C).
-// Scale: OKOK / Chipsea BLE broadcast scale (okok_scale.*) — no pairing, no keys.
+// 480x320 + XPT2046 touch, speaker amp, RGB LED, ToF on I2C; USB powered).
+// Scale: selected at build time via scale.h — OKOK broadcast (default, no keys) or
+// the Xiaomi S200 (-D SCALE_S200, personal builds using the keys in secrets.h).
 //
 // UI "Halo" (landscape 480x320, black = mirror, one mint accent, amber for
 // attention, smooth Outfit/Inter fonts from halo_fonts.h):
 //   rail screens — 64 px icon rail (Home · Trends · Settings) + content
 //     Home     — halo ring (goal progress) around the latest weight, week pill,
 //                Goal / Streak / 30-day sparkline column. The resting screen.
-//     Trends   — EWMA trend line over raw dots, 30D / 90D / 1Y / All
+//     Trends   — EWMA trend line over raw dots, 14D / 30D / 90D / All
 //     Settings — 2x4 tiles
 //   full-screen — Measuring (comet arc + live number), Result (30 s), Is-this-you
 //                 (20 s), Night glance (quiet hours), Wi-Fi setup (QR code)
@@ -27,16 +28,14 @@
 #include <math.h>
 #include <qrcode.h>
 
-#include "battery.h"
 #include "buzzer.h"
 #include "cloud.h"
 #include "config.h"
 #include "halo_fonts.h"
 #include "history.h"
-#include "okok_scale.h"
+#include "scale.h"
 #include "timekeeper.h"
 
-namespace Scale = OkokScale;
 
 // ── Scale task → UI ─────────────────────────────────────────────────────────
 struct WEvt { float kg; bool stable; };
@@ -118,12 +117,21 @@ static bool  setUnitLb = false;         // display kg (false) or lb (true)
 static int   setSound  = SOUND_MID;     // speaker volume: Off / Low / Mid / High
 static float setGoalKg = 0;             // goal weight in kg (0 = none)
 static float setGoalStartKg = 0;        // weight when the goal was set (ring 0 %)
+#if defined(SCALE_S200)
+static const float HEIGHT_DEFAULT_CM = USER_HEIGHT_CM;   // personal build: owner's height
+#else
+static const float HEIGHT_DEFAULT_CM = 0;                // product: unset until entered
+#endif
+static float setHeightCm = 0;           // body height for BMI (0 = not set)
 static String savedScaleMac;            // scale MAC as stored in NVS
 
 // Settings tiles (2 columns x 4 rows), each a touch target.
-enum MenuItem { MI_SYNC, MI_UNIT, MI_SOUND, MI_GOAL, MI_CALIBRATE, MI_SCALE, MI_OTA,
-                MI_WIFI, MI_COUNT };
-static const int TILE_Y0 = 50, TILE_W = 185, TILE_H = 58, TILE_GAP = 8;
+enum MenuItem { MI_SYNC, MI_UNIT, MI_GOAL, MI_HEIGHT, MI_SOUND, MI_CALIBRATE, MI_SCALE,
+                MI_OTA, MI_WIFI, MI_COUNT };
+static const int TILE_ROWS = (MI_COUNT + 1) / 2;
+static const int TILE_Y0 = 50, TILE_W = 185, TILE_H = 46, TILE_GAP = 6;
+// Text rows inside a tile: small label (top), value (middle line), big-number baseline.
+static const int TILE_LAB_Y = 6, TILE_VAL_Y = TILE_H - 15, TILE_BASE_Y = TILE_H - 8;
 static int tileX(int i) { return MAIN_X + (i % 2) * (TILE_W + TILE_GAP); }
 static int tileY(int i) { return TILE_Y0 + (i / 2) * (TILE_H + TILE_GAP); }
 // Goal tile -/+ buttons (offsets inside the tile, 40x40 touch targets).
@@ -131,8 +139,8 @@ static const int GB_MINUS_DX = TILE_W - 8 - 40 - 6 - 40, GB_PLUS_DX = TILE_W - 8
 static const int GB_DY = (TILE_H - 40) / 2, GB_W = 40;
 
 // Trends range control.
-static const int RANGES[] = {30, 90, 365, 0};      // days; 0 = all
-static const char *RANGE_NAMES[] = {"30D", "90D", "1Y", "All"};
+static const int RANGES[] = {14, 30, 90, 0};       // days; 0 = all
+static const char *RANGE_NAMES[] = {"14D", "30D", "90D", "All"};
 static int rangeIdx = 0;
 static const int SEG_X = 276, SEG_Y = 10, SEG_BW = 46, SEG_BH = 40;
 
@@ -158,6 +166,7 @@ static void settingsLoad() {
   setSound  = prefs.getInt("sound", SOUND_MID);
   setGoalKg = prefs.getFloat("goal", 0);
   setGoalStartKg = prefs.getFloat("goalst", 0);
+  setHeightCm = prefs.getFloat("height", HEIGHT_DEFAULT_CM);
   savedScaleMac = prefs.getString("scalemac", "");
   prefs.end();
   buzzerSetLevel(setSound);
@@ -168,6 +177,7 @@ static void settingsSave() {
   prefs.putInt("sound", setSound);
   prefs.putFloat("goal", setGoalKg);
   prefs.putFloat("goalst", setGoalStartKg);
+  prefs.putFloat("height", setHeightCm);
   prefs.end();
 }
 static void scaleMacSave(const char *mac) {
@@ -213,9 +223,6 @@ static bool contentDirty = false;  // rail content area (screen switch, new data
 static bool todayDirty = false;    // in-place values (live weight, Home numbers)
 static bool scaleTileDirty = false;// Settings "Scale" tile (scale MAC learned)
 
-// Battery (read every few seconds; -1 = not read yet).
-static int batPct = -1;
-static float batV = 0;
 
 // Rejected-reading confirmation ("is this you?")
 static float pendingKg = 0;
@@ -633,18 +640,6 @@ static void drawLogo(int x, int y) {
   vecDraw(v, x, y, 22, 22, C_INK);
 }
 
-// Battery glyph, 24 x 14.
-static void drawBattery(int x, int y, int pct) {
-  Vec v(1, x, y, C_TEXT2);
-  v.rbox(0.75f, 0.75f, 20, 12.5f, 3, 1.5f);
-  v.rbox(22, 4.5f, 1.6f, 5, 0.8f, 0);
-  if (pct > 0) {
-    v.col = pct <= 20 ? C_AMBER : C_TEXT;
-    v.rbox(3, 3, 16.0f * (pct > 100 ? 100 : pct) / 100, 8, 1.5f, 0);
-  }
-  vecDraw(v, x, y, 24, 14, C_INK);
-}
-
 // ── Halo ring renderer ──────────────────────────────────────────────────────
 // Rings are composited per pixel (track, progress arcs with round caps and a
 // mint→cyan diagonal gradient, glow + end dots) and pushed as horizontal spans
@@ -821,7 +816,7 @@ static void drawHomeHeaderLeft() {
   text(date, MAIN_X, 34, TL_DATUM, C_TEXT2, C_INK, 200);
 }
 
-// Top-right status cluster: Wi-Fi · battery · clock (right-aligned to the edge).
+// Top-right status cluster: Wi-Fi · clock (right-aligned to the edge).
 static int homeClockX = 0;   // left edge of the clock slot (set by drawHomeClock)
 static void drawHomeClock() {
   char hm[8];
@@ -831,12 +826,9 @@ static void drawHomeClock() {
   homeClockX = HOME_COL_R - slot;
   text(hm, HOME_COL_R, 25, MR_DATUM, C_TEXT, C_INK, slot);
 }
-static void drawHomeBattery() {
-  if (batPct >= 0) drawBattery(homeClockX - 10 - 24, 18, batPct);
-}
 static void drawHomeWifi() {
   if (!wifiSavedSsid()[0]) return;     // never set up: no icon
-  icon(IC_WIFI, homeClockX - 10 - 24 - 10 - 16, 17, 16, syncing ? C_CYAN : C_TEXT2, C_INK);
+  icon(IC_WIFI, homeClockX - 10 - 16, 17, 16, syncing ? C_CYAN : C_TEXT2, C_INK);
 }
 
 // Ring + everything inside it.
@@ -1008,14 +1000,36 @@ static void drawHomeColumn() {
   }
 }
 
+// BMI pill under the goal ring: "BMI 24.1". Mint in the healthy band (18.5-25),
+// amber outside it (the Halo palette has no red). No height: a quiet hint instead.
+static void drawHomeBmi() {
+  const int cy = HOME_CY + 111 + 15;               // just below the ring
+  tft.fillRect(HOME_CX - 115, cy - 13, 230, 27, C_INK);
+  if (!historyCount()) return;
+  char t[40];
+  useFont(F_I11B);
+  if (setHeightCm <= 0) {
+    text("Add your height in Settings for BMI", HOME_CX, cy, MC_DATUM, C_TEXT3, C_INK);
+    return;
+  }
+  float m = setHeightCm / 100.0f;
+  float bmi = historyLast().kg / (m * m);
+  bool healthy = bmi >= 18.5f && bmi < 25.0f;    // colour only — no category text
+  snprintf(t, sizeof(t), "BMI %.1f", bmi);
+  uint16_t bg = healthy ? C_MINTDIM : C_CHIP, fg = healthy ? C_MINT : C_AMBER;
+  int w = tft.textWidth(t) + 24;
+  tft.fillSmoothRoundRect(HOME_CX - w / 2, cy - 12, w, 25, 12, bg, C_INK);
+  text(t, HOME_CX, cy + 1, MC_DATUM, fg, bg);
+}
+
 static void drawHome() {
   drawHomeHeaderLeft();
   drawHomeClock();
-  drawHomeBattery();
   drawHomeWifi();
   drawHomeRing();
   drawHomeCenter();
   drawHomeColumn();
+  drawHomeBmi();
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1100,8 +1114,9 @@ static void drawTrends() {
   float dTr = historyTrendLast() - from;
   if (m >= 2 || i0 > 0) {
     fmtAbs(dTr, a, sizeof(a));
-    const char *span = days == 30 ? "in 30 days" : days == 90 ? "in 90 days"
-                       : days == 365 ? "in 1 year" : "overall";
+    char span[16];
+    if (days > 0) snprintf(span, sizeof(span), "in %d days", days);
+    else snprintf(span, sizeof(span), "overall");
     snprintf(s, sizeof(s), "%s%s %s %s", fabsf(toDisp(dTr)) < 0.05f ? "" : dTr < 0 ? "−" : "+",
              a, unitStr(), span);
     text(s, x + 12, 84, L_BASELINE, goodDir(dTr) ? C_MINT : C_TEXT2, C_INK);
@@ -1175,6 +1190,17 @@ static void drawTrends() {
     }
   }
 
+  // Each reading's pull on the trend: a thin line from the dot to the trend at
+  // the same moment — mint when it pulls toward the goal, amber when away.
+  uint16_t pullGood = mix(C_MINT, C_INK, 0.55f), pullBad = mix(C_AMBER, C_INK, 0.55f);
+  for (int i = i0; i < n; i++) {
+    float d = historyAt(i).kg - historyTrendAt(i);
+    int rx = (int)xOf(i), ry = (int)yOf(toDisp(historyAt(i).kg));
+    int ty = (int)yOf(toDisp(historyTrendAt(i)));
+    if (abs(ry - ty) > 3)
+      tft.drawFastVLine(rx, min(ry, ty), abs(ry - ty), goodDir(d) ? pullGood : pullBad);
+  }
+
   // Raw readings: faint dots.
   uint16_t dotCol = mix(C_TEXT3, C_INK, A_RAWDOT);
   for (int i = i0; i < n; i++) {
@@ -1195,6 +1221,14 @@ static void drawTrends() {
   useFont(F_I11B);
   int ly = ey + 24 <= CH_BASE - 2 ? (int)ey + 24 : (int)ey - 14;
   text(s, (int)ex - 10, ly, R_BASELINE, C_TEXT, C_INK);
+
+  // Legend, top-right above the chart: • Weigh-ins  ━ Trend.
+  useFont(F_I10);
+  int lx = CH_X1 - text("Trend", CH_X1, 100, MR_DATUM, C_TEXT2, C_INK) - 6;
+  tft.drawWideLine(lx - 14, 100, lx, 100, 2.5f, C_MINT, C_INK);
+  lx -= 14 + 12;
+  lx -= text("Weigh-ins", lx, 100, MR_DATUM, C_TEXT2, C_INK) + 7;
+  tft.fillSmoothCircle(lx, 100, 2, dotCol, C_INK);
 
   // X labels.
   useFont(F_I10);
@@ -1252,14 +1286,14 @@ static void tileText(int i, int tx, const char *lab, const char *val, uint16_t v
                      int dotCol = -1) {
   int y = tileY(i);
   useFont(F_I11);
-  text(lab, tx, y + 11, TL_DATUM, C_TEXT2, C_PANEL);
+  text(lab, tx, y + TILE_LAB_Y, TL_DATUM, C_TEXT2, C_PANEL);
   int vx = tx;
   if (dotCol >= 0) {
-    tft.fillSmoothCircle(tx + 3, y + 37, 3, dotCol, C_PANEL);
+    tft.fillSmoothCircle(tx + 3, y + TILE_VAL_Y, 3, dotCol, C_PANEL);
     vx += 13;
   }
   useFont(F_I15B);
-  text(val, vx, y + 37, ML_DATUM, vc, C_PANEL);
+  text(val, vx, y + TILE_VAL_Y, ML_DATUM, vc, C_PANEL);
 }
 
 // Sheet tile status line; returns its dot colour.
@@ -1306,27 +1340,52 @@ static void drawSettingTile(int i) {
       static const char *NAMES[4] = {"Off", "Low", "Medium", "High"};
       int tx = tileFrame(i, IC_SPEAKER);
       useFont(F_I11);
-      text("Sound", tx, y + 11, TL_DATUM, C_TEXT2, C_PANEL);
+      text("Sound", tx, y + TILE_LAB_Y, TL_DATUM, C_TEXT2, C_PANEL);
       useFont(F_I15B);
-      int vw = text(NAMES[setSound], tx, y + 37, ML_DATUM, C_TEXT, C_PANEL);
+      int vw = text(NAMES[setSound], tx, y + TILE_VAL_Y, ML_DATUM, C_TEXT, C_PANEL);
       for (int b = 0; b < 3; b++) {   // volume bars
         int bh = 6 + b * 3, bx = tx + vw + 8 + b * 6;
-        tft.fillRect(bx, y + 43 - bh, 4, bh, b < setSound ? C_MINT : C_BTNEDGE);
+        tft.fillRect(bx, y + TILE_VAL_Y + 6 - bh, 4, bh, b < setSound ? C_MINT : C_BTNEDGE);
       }
     } break;
     case MI_GOAL: {
       int tx = tileFrame(i, -1);
       useFont(F_I11);
-      text("Goal", tx, y + 11, TL_DATUM, C_TEXT2, C_PANEL);
+      text("Goal", tx, y + TILE_LAB_Y, TL_DATUM, C_TEXT2, C_PANEL);
       if (setGoalKg > 0) {
         snprintf(v, sizeof(v), "%.0f", toDisp(setGoalKg));
         useFont(F_O18);
-        int vw = text(v, tx, y + 44, L_BASELINE, C_TEXT, C_PANEL);
+        int vw = text(v, tx, y + TILE_BASE_Y, L_BASELINE, C_TEXT, C_PANEL);
         useFont(F_I15B);
-        text(unitStr(), tx + vw + 4, y + 44, L_BASELINE, C_TEXT, C_PANEL);
+        text(unitStr(), tx + vw + 4, y + TILE_BASE_Y, L_BASELINE, C_TEXT, C_PANEL);
       } else {
         useFont(F_I15B);
-        text("Off", tx, y + 37, ML_DATUM, C_TEXT2, C_PANEL);
+        text("Off", tx, y + TILE_VAL_Y, ML_DATUM, C_TEXT2, C_PANEL);
+      }
+      for (int b = 0; b < 2; b++) {
+        int bx = x + (b ? GB_PLUS_DX : GB_MINUS_DX);
+        tft.fillSmoothRoundRect(bx, y + GB_DY, GB_W, 40, 10, C_CHIP, C_PANEL);
+        icon(b ? IC_PLUS : IC_MINUS, bx + 12, y + GB_DY + 12, 16, C_TEXT, C_CHIP);
+      }
+    } break;
+    case MI_HEIGHT: {
+      int tx = tileFrame(i, -1);
+      useFont(F_I11);
+      text("Height \xC2\xB7 for BMI", tx, y + TILE_LAB_Y, TL_DATUM, C_TEXT2, C_PANEL);
+      if (setHeightCm <= 0) {
+        useFont(F_I15B);
+        text("Off", tx, y + TILE_VAL_Y, ML_DATUM, C_TEXT2, C_PANEL);
+      } else if (setUnitLb) {                     // feet + inches (Inter has ' and ")
+        int in = (int)roundf(setHeightCm / 2.54f);
+        snprintf(v, sizeof(v), "%d' %d\"", in / 12, in % 12);
+        useFont(F_I15B);
+        text(v, tx, y + TILE_VAL_Y, ML_DATUM, C_TEXT, C_PANEL);
+      } else {
+        snprintf(v, sizeof(v), "%.0f", setHeightCm);
+        useFont(F_O18);
+        int vw = text(v, tx, y + TILE_BASE_Y, L_BASELINE, C_TEXT, C_PANEL);
+        useFont(F_I15B);
+        text("cm", tx + vw + 4, y + TILE_BASE_Y, L_BASELINE, C_TEXT, C_PANEL);
       }
       for (int b = 0; b < 2; b++) {
         int bx = x + (b ? GB_PLUS_DX : GB_MINUS_DX);
@@ -1860,10 +1919,10 @@ static void stopOtaMode() {
 // Health readout — serial and (during OTA mode) the web page.
 static void diagPrint() {
   Serial.printf("[diag] fw=%s board=%s up=%lus heap=%u min=%u readings=%d last=%.2f "
-                "bat=%.2fV(%d%%) scale=%s cloud=%s wifi=%d rssi=%d lastPull=%d\n",
+                "scale=%s cloud=%s wifi=%d rssi=%d lastPull=%d\n",
                 FW_VERSION, BOARD_NAME, (unsigned long)(millis() / 1000),
                 (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
-                historyCount(), historyCount() ? historyLast().kg : 0.0, batV, batPct,
+                historyCount(), historyCount() ? historyLast().kg : 0.0,
                 Scale::learnedMac()[0] ? Scale::learnedMac() : "auto",
                 cloudConfigured() ? "sheet" : "off",
                 WiFi.status() == WL_CONNECTED, (int)WiFi.RSSI(), lastPullN);
@@ -1875,14 +1934,14 @@ static String diagHtml() {
            "<!doctype html><html><body style='font-family:sans-serif;text-align:center'>"
            "<h2>Smart Mirror &mdash; fw %s (%s)</h2>"
            "<p>uptime %lus &middot; heap %u (min %u)<br>"
-           "readings %d &middot; last %.1f kg &middot; battery %.2f V (%d%%)<br>"
+           "readings %d &middot; last %.1f kg<br>"
            "scale %s &middot; wifi %s &middot; %d dBm &middot; %s</p>"
            "<form method='POST' action='/update' enctype='multipart/form-data'>"
            "<input type='file' name='f' accept='.bin'><br><br>"
            "<input type='submit' value='Upload firmware'></form></body></html>",
            FW_VERSION, BOARD_NAME, (unsigned long)(millis() / 1000),
            (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
-           historyCount(), historyCount() ? historyLast().kg : 0.0, batV, batPct,
+           historyCount(), historyCount() ? historyLast().kg : 0.0,
            Scale::learnedMac()[0] ? Scale::learnedMac() : "auto",
            WiFi.SSID().c_str(), (int)WiFi.RSSI(),
            WiFi.localIP().toString().c_str());
@@ -1985,8 +2044,9 @@ static void showBusy(const char *msg) {
 
 static void handleSettingsTap(int tx, int ty) {
   int col = (tx - MAIN_X) / (TILE_W + TILE_GAP), row = (ty - TILE_Y0) / (TILE_H + TILE_GAP);
-  if (tx < MAIN_X || col > 1 || ty < TILE_Y0 || row > 3) return;
+  if (tx < MAIN_X || col > 1 || ty < TILE_Y0 || row >= TILE_ROWS) return;
   int i = row * 2 + col;
+  if (i >= MI_COUNT) return;                                      // empty slot
   if (tx > tileX(i) + TILE_W || ty > tileY(i) + TILE_H) return;   // tapped a gap
   switch (i) {
     case MI_SYNC:
@@ -2007,7 +2067,8 @@ static void handleSettingsTap(int tx, int ty) {
       setUnitLb = !setUnitLb;
       settingsSave();
       drawSettingTile(MI_UNIT);
-      drawSettingTile(MI_GOAL);   // goal is shown in the selected unit
+      drawSettingTile(MI_GOAL);   // goal and height are shown in the selected unit
+      drawSettingTile(MI_HEIGHT);
       break;
     case MI_SOUND:
       // Off -> Low -> Mid -> High -> Off; play a sample at the new level.
@@ -2038,6 +2099,28 @@ static void handleSettingsTap(int tx, int ty) {
       }
       settingsSave();
       drawSettingTile(MI_GOAL);
+    } break;
+    case MI_HEIGHT: {
+      // 1 cm steps (1 inch in lb mode); tapping the label clears it (BMI hidden).
+      int dx = tx - tileX(i);
+      bool minus = dx >= GB_MINUS_DX - 3 && dx < GB_MINUS_DX + GB_W + 3;
+      bool plus  = dx >= GB_PLUS_DX - 3;
+      if (minus || plus) {
+        if (setHeightCm <= 0) {
+          setHeightCm = 170;                                   // sensible starting point
+        } else if (setUnitLb) {
+          int in = (int)roundf(setHeightCm / 2.54f) + (plus ? 1 : -1);
+          setHeightCm = in * 2.54f;
+        } else {
+          setHeightCm = roundf(setHeightCm) + (plus ? 1 : -1);
+        }
+        if (setHeightCm < 100) setHeightCm = 100;
+        if (setHeightCm > 230) setHeightCm = 230;
+      } else {
+        setHeightCm = 0;
+      }
+      settingsSave();
+      drawSettingTile(MI_HEIGHT);
     } break;
     case MI_CALIBRATE:
       runCalibrate(); break;
@@ -2114,6 +2197,23 @@ static void handleTap(int tx, int ty) {
   }
 }
 
+// Hold a finger on the screen at power-on to wipe WiFi + reopen the portal.
+// One pressure reading isn't enough: a touch read that returns zeros looks like
+// full pressure, and that wiped the saved network on ordinary restarts. So it
+// takes a valid (calibrated, consistent) touch held for ~2 s, with a prompt.
+static bool bootHoldForPortal() {
+  uint16_t x, y;
+  delay(60);
+  if (!tft.getTouch(&x, &y)) return false;
+  useFont(F_I15B);
+  text("Keep holding to reset Wi-Fi…", SCR_W / 2, SCR_H / 2, MC_DATUM, C_CYAN, C_INK);
+  bool held = true;
+  for (int i = 0; i < 40 && held; i++) { delay(50); held = tft.getTouch(&x, &y); }
+  tft.fillScreen(C_INK);
+  Serial.printf("[wifi] boot hold: %s\n", held ? "reset Wi-Fi" : "released, keeping Wi-Fi");
+  return held;
+}
+
 void setup() {
   Serial.begin(115200);
   delay(300);
@@ -2121,7 +2221,6 @@ void setup() {
 
   ledBegin();
   buzzerBegin(PIN_SPEAKER, PIN_SPEAKER_EN);
-  batteryBegin();
   tft.init();
   tft.setRotation(1);           // landscape
   tft.setSwapBytes(true);       // pushImage takes native RGB565 buffers
@@ -2130,12 +2229,8 @@ void setup() {
   lastWakeMs = millis();
   calLoad();                    // board default, or the user's saved calibration
 
-  // Hold a finger on the screen at power-on to wipe WiFi + reopen the portal.
-  delay(60);
-  bool forcePortal = (tft.getTouchRawZ() > 600);
+  bool forcePortal = bootHoldForPortal();
 
-  batV = batteryVolts();
-  batPct = batteryPercent(batV);
   {   // boot splash: the halo track + a status line
     RingArc a = {60, 4, 0, 360, C_TRACK, C_TRACK, 1, false};
     drawHalo(SCR_W / 2, 140, 54, 66, &a, 1, nullptr, 0, 60);
@@ -2151,6 +2246,14 @@ void setup() {
   timeSyncAtBoot(forcePortal);
   historyBegin();
   settingsLoad();   // units / sound / goal / learned scale from NVS
+
+  // First boot of a unit with a sheet configured (e.g. replacing an older mirror):
+  // take the weight history over from the sheet before the first weigh-in.
+  if (historyCount() == 0 && cloudConfigured()) {
+    Serial.println("[cloud] empty history -> pulling it from the sheet");
+    lastPullN = cloudPull();
+    if (lastPullN >= 0) lastSyncAt = nowEpoch();
+  }
 
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
   tof.setTimeout(500);
@@ -2179,8 +2282,9 @@ void setup() {
   if (quietHours()) backlight(BL_NIGHT_USE);
   mode = MODE_RAIL;
   screen = SCR_HOME;
-  dirty = true;
-  buzzerAccept();
+  render();          // draw Home first: the boot melody blocks for ~1.7 s
+  dirty = false;
+  buzzerBoot();
 
   mainTick = millis();
   xTaskCreatePinnedToCore(watchdogTask, "wdt", 3072, nullptr, 1, nullptr, 1);
@@ -2189,14 +2293,13 @@ void setup() {
 static uint32_t lastTof = 0;
 static uint32_t lastLiveDraw = 0;
 static uint32_t lastAnim = 0;
-static uint32_t lastBat = 0;
 static int lastMinute = -1;
 static long lastDay = -2;
 
 void loop() {
   mainTick = millis();   // feed the watchdog
 
-  // Serial dev hooks: o=OTA, p=pull, d=diag, c=calibrate touch,
+  // Serial dev hooks: o=OTA, p=pull, d=diag, c=calibrate touch, t=raw touch,
   // f=fill demo history (real log backed up), r=restore the real log.
   if (Serial.available()) {
     int c = Serial.read();
@@ -2217,6 +2320,30 @@ void loop() {
       contentDirty = true;
     }
     else if (c == 'd' || c == 'D') diagPrint();
+    else if (c == 'h') {                  // dump the stored readings
+      for (int i = 0; i < historyCount(); i++) {
+        Reading r = historyAt(i);
+        time_t t = r.ts;
+        struct tm tm;
+        char d[24] = "unclocked";
+        if (localTm(t, tm)) strftime(d, sizeof(d), "%Y-%m-%d %H:%M", &tm);
+        Serial.printf("[hist] %3d ts=%lu %s kg=%.2f trend=%.2f\n", i, (unsigned long)r.ts, d,
+                      r.kg, historyTrendAt(i));
+        mainTick = millis();
+      }
+    }
+    else if (c == 't') {                  // raw touch readout for 8 s
+      for (int i = 0; i < 40; i++) {
+        uint16_t rx, ry, x, y;
+        tft.getTouchRaw(&rx, &ry);
+        uint16_t z = tft.getTouchRawZ();
+        bool ok = tft.getTouch(&x, &y);
+        Serial.printf("[touch] raw x=%4u y=%4u z=%4u -> %s %u,%u\n", rx, ry, z,
+                      ok ? "TAP" : "none", ok ? x : 0, ok ? y : 0);
+        mainTick = millis();
+        delay(200);
+      }
+    }
     else if (c == 'c' || c == 'C') { displayWake(); runCalibrate(); }
   }
   if (wantOta) { wantOta = false; startOtaMode(); }
@@ -2229,7 +2356,7 @@ void loop() {
     return;
   }
 
-  bool clockChanged = false, batChanged = false;
+  bool clockChanged = false;
 
   // Status from the scale task.
   SEvt se;
@@ -2249,7 +2376,19 @@ void loop() {
   while (xQueueReceive(weightQ, &we, 0) == pdTRUE) {
     lastWeighMs = millis();            // note scale activity → hold off WiFi sync
     displayWake();
-    if (we.stable) {
+    // One weigh-in, one reading: a second "stable" within a minute of the last
+    // stored reading is the same stand (the scale re-locking, a step off and on).
+    uint32_t sinceLast = (timeIsSet() && historyCount()) ? nowEpoch() - historyLast().ts : 9999;
+    if (we.stable && sinceLast < 60) {
+      Serial.printf("[ui] ignored %.2f kg: %lus after the last reading\n", we.kg,
+                    (unsigned long)sinceLast);
+      if (mode == MODE_MEASURE) {      // leave the live screen; a Result stays up
+        liveState = 0;
+        mode = MODE_RAIL;
+        screen = SCR_HOME;
+        dirty = true;
+      }
+    } else if (we.stable) {
       if (validateReading(we.kg)) {
         recordStable(we.kg);                     // accepted → store + sync + Result
       } else {
@@ -2304,17 +2443,10 @@ void loop() {
     }
   }
 
-  // Battery every 10 s.
-  if (millis() - lastBat > 10000) {
-    lastBat = millis();
-    batV = batteryVolts();
-    int p = batteryPercent(batV);
-    if (p != batPct) { batPct = p; batChanged = true; }
-  }
-
   // Clock: redraw when the minute changes; a new day refreshes Home's labels.
   if (timeIsSet()) {
     time_t t = nowEpoch();
+    historyDateUnclocked((uint32_t)t);   // no-op unless a reading awaits its date
     struct tm tm;
     localtime_r(&t, &tm);
     if (tm.tm_min != lastMinute) {
@@ -2390,7 +2522,6 @@ void loop() {
         contentDirty = todayDirty = scaleTileDirty = false;
       } else if (screen == SCR_HOME) {
         if (clockChanged) { drawHomeClock(); drawHomeHeaderLeft(); }
-        if (batChanged) drawHomeBattery();
       } else if (screen == SCR_SETTINGS) {
         if (scaleTileDirty) { drawSettingTile(MI_SCALE); scaleTileDirty = false; }
         if (clockChanged) {           // "Synced Xm ago": repaint only if it changed

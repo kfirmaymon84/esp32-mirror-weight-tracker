@@ -16,6 +16,9 @@ void historyReload();                // re-read the log file into RAM (after a c
 void historyAdd(uint32_t ts, float kg);
 
 int historyCount();
+// Once the clock is set: give the latest reading, if it was taken unclocked
+// earlier in this boot, its real time (now minus the time since it was taken).
+void historyDateUnclocked(uint32_t now);
 Reading historyAt(int i);            // 0 = oldest kept
 Reading historyLast();               // most recent (valid only if count>0)
 

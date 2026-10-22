@@ -19,16 +19,14 @@
 #define PIN_LED_R         22         // RGB LED, common anode, active LOW
 #define PIN_LED_G         16
 #define PIN_LED_B         17
-#define PIN_BAT_ADC       34         // battery voltage via divider
-#define BAT_DIVIDER       1.983f     // calibrated: pin 2014 mV <-> 3.994 V on a meter
 #define TOUCH_CAL_DEFAULT { 278, 3660, 204, 3646, 7 }   // rotation 1
 #define TOUCH_CAL_KEY     "cal40"    // NVS key (per board, so variants don't clash)
 
 #elif defined(BOARD_E32R35T)
 // LCDWiki E32R35T: ESP32-32E + 3.5" ST7796U 320x480 + XPT2046. The datasheet
 // claims the 4" pinout, but this board differs (measured 2026-10-21): RGB LED is
-// R=4 G=17 B=16, the speaker amp is always on (no enable pin), the I2C (ToF)
-// connector is SDA=21/SCL=22, and there is no battery-voltage sense circuit.
+// R=4 G=17 B=16, the speaker amp is always on (no enable pin), and the I2C (ToF)
+// connector is SDA=21/SCL=22.
 // Same resolution, so the UI is identical.
 #define BOARD_NAME        "E32R35T 3.5in"
 #define SCR_W             480
@@ -41,8 +39,6 @@
 #define PIN_LED_R         4          // active LOW
 #define PIN_LED_G         17
 #define PIN_LED_B         16
-#define PIN_BAT_ADC       -1         // no battery gauge on this board (icon hidden)
-#define BAT_DIVIDER       2.0f
 #define TOUCH_CAL_DEFAULT { 289, 3576, 299, 3482, 3 }   // rotation 1
 #define TOUCH_CAL_KEY     "cal35"
 

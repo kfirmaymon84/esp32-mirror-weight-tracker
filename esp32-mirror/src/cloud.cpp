@@ -1,9 +1,11 @@
 #include "cloud.h"
 
 #include <Arduino.h>
+#include <esp_system.h>
 #include <HTTPClient.h>
 #include <LittleFS.h>
 #include <Preferences.h>
+#include <sys/stat.h>
 #include <WiFiClientSecure.h>
 
 #include "config.h"
@@ -24,6 +26,14 @@ static void loadConfig() {
   s_url = p.getString("url", "");
   s_token = p.getString("tok", "");
   p.end();
+#if defined(CLOUD_FROM_SECRETS)
+  // Personal builds only: default to the owner's sheet from secrets.h when the
+  // device has none saved. Product builds never compile the sheet in.
+  if (!s_url.length()) {
+    s_url = CLOUD_URL;
+    s_token = CLOUD_TOKEN;
+  }
+#endif
   s_loaded = true;
 }
 
@@ -53,31 +63,54 @@ bool cloudConfigured() { loadConfig(); return s_url.length() > 0; }
 const char *cloudUrl() { loadConfig(); return s_url.c_str(); }
 const char *cloudToken() { loadConfig(); return s_token.c_str(); }
 
+// Pending count is cached in RAM: the UI and main loop ask for it every few ms,
+// and on this core even LittleFS.exists() opens the file and logs "[E] does not
+// exist" when the queue is empty. The file is read once; after that the cache is
+// kept in step by cloudQueue() / cloudFlush().
+static int s_pending = -1;                 // -1 = not counted yet
+
+static bool pendingFileExists() {
+  struct stat st;                          // stat() checks silently, unlike exists()
+  return stat("/littlefs/pending.csv", &st) == 0;
+}
+
+// A reading taken before the clock was set (ts 0) is queued as "0,kg,ms,boot":
+// millis() when it was taken + this boot's id. Once NTP sets the clock in the
+// same boot it gets its real time; the sheet would otherwise stamp the upload
+// time (a burst of rows seconds apart). From an earlier boot it can't be dated.
+static uint32_t bootId() {
+  static uint32_t id = 0;
+  while (!id) id = esp_random();
+  return id;
+}
+
 void cloudQueue(uint32_t ts, float kg) {
+  int before = cloudPendingCount();
   File f = LittleFS.open(PENDING_FILE, "a");
   if (!f) {
     Serial.println("[cloud] queue open failed");
     return;
   }
-  f.printf("%u,%.2f\n", (unsigned)ts, kg);
+  if (ts) f.printf("%u,%.2f\n", (unsigned)ts, kg);
+  else f.printf("0,%.2f,%lu,%lu\n", kg, (unsigned long)millis(), (unsigned long)bootId());
   f.close();
-  Serial.printf("[cloud] queued %.2f kg (pending=%d)\n", kg, cloudPendingCount());
+  s_pending = before + 1;
+  Serial.printf("[cloud] queued %.2f kg (pending=%d)\n", kg, s_pending);
 }
 
 int cloudPendingCount() {
-  // Guard the open: when the queue is empty the file doesn't exist, and opening
-  // a missing file for read spams LittleFS "[E] does not exist" every loop.
-  if (!LittleFS.exists(PENDING_FILE)) return 0;
+  if (s_pending >= 0) return s_pending;
+  s_pending = 0;
+  if (!pendingFileExists()) return 0;
   File f = LittleFS.open(PENDING_FILE, "r");
   if (!f) return 0;
-  int n = 0;
   while (f.available()) {
     String line = f.readStringUntil('\n');
     line.trim();
-    if (line.length()) n++;
+    if (line.length()) s_pending++;
   }
   f.close();
-  return n;
+  return s_pending;
 }
 
 // Nothing to send while no sheet is configured (readings stay queued locally).
@@ -110,7 +143,7 @@ int cloudFlush() {
 
   // Read all pending readings into memory.
   static const int MAXQ = 64;
-  uint32_t ts[MAXQ];
+  uint32_t ts[MAXQ], ms[MAXQ], boot[MAXQ];
   float kg[MAXQ];
   int nq = 0;
   {
@@ -123,6 +156,9 @@ int cloudFlush() {
       if (c < 0) continue;
       ts[nq] = (uint32_t)line.substring(0, c).toInt();
       kg[nq] = line.substring(c + 1).toFloat();
+      int c2 = line.indexOf(',', c + 1), c3 = c2 < 0 ? -1 : line.indexOf(',', c2 + 1);
+      ms[nq] = c3 < 0 ? 0 : (uint32_t)strtoul(line.substring(c2 + 1, c3).c_str(), nullptr, 10);
+      boot[nq] = c3 < 0 ? 0 : (uint32_t)strtoul(line.substring(c3 + 1).c_str(), nullptr, 10);
       nq++;
     }
     f.close();
@@ -136,6 +172,21 @@ int cloudFlush() {
     return 0;
   }
   ntpEnsure(4000);   // backfill the clock if boot had no network
+
+  // Date readings taken unclocked earlier in this boot (see cloudQueue).
+  if (timeIsSet()) {
+    uint32_t now = (uint32_t)nowEpoch();
+    for (int i = 0; i < nq; i++) {
+      if (ts[i] || !boot[i]) continue;
+      if (boot[i] == bootId()) {
+        ts[i] = now - (millis() - ms[i]) / 1000;
+        Serial.printf("[cloud] dated unclocked %.2f kg @ %u\n", kg[i], (unsigned)ts[i]);
+      } else {
+        Serial.printf("[cloud] %.2f kg was taken before a restart without a clock: "
+                      "the sheet will stamp the upload time\n", kg[i]);
+      }
+    }
+  }
 
   int sent = 0;
   for (int i = 0; i < nq; i++) {
@@ -154,10 +205,14 @@ int cloudFlush() {
   } else if (sent > 0) {
     File f = LittleFS.open(PENDING_FILE, "w");
     if (f) {
-      for (int i = sent; i < nq; i++) f.printf("%u,%.2f\n", (unsigned)ts[i], kg[i]);
+      for (int i = sent; i < nq; i++) {
+        if (ts[i] || !boot[i]) f.printf("%u,%.2f\n", (unsigned)ts[i], kg[i]);
+        else f.printf("0,%.2f,%lu,%lu\n", kg[i], (unsigned long)ms[i], (unsigned long)boot[i]);
+      }
       f.close();
     }
   }
+  s_pending = nq - sent;                   // keep the RAM count in step with the file
   Serial.printf("[cloud] synced %d/%d\n", sent, nq);
   return sent;
 }

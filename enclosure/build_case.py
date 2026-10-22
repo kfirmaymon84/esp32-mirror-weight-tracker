@@ -2,7 +2,7 @@
 
 Parametric CadQuery model. Run:  py -3 build_case.py
 Outputs (out/): front_shell / back_cover / stand as STEP + STL, an assembly
-preview STEP (case + board + battery/speaker/ToF placeholders), SVG views, and
+preview STEP (case + board + speaker/ToF placeholders), SVG views, and
 an interference report checking every part against the real board model.
 
 Local frame (all mm): origin = PCB centre, +X = USB-C end, +Y = screen top
@@ -29,7 +29,6 @@ USB_Y, USB_Z = 0.0, -2.69                   # USB-C receptacle centre
 BUTTONS = [(52.285, -15.03), (52.285, 15.08)]  # BOOT (-Y), RESET (+Y), pressed from back
 
 # ── Parts that go inside (user-supplied sizes) ──────────────────────────────
-BAT = (50.0, 34.0, 10.0)                    # LiPo L x W x T
 SPK = (16.0, 9.0, 4.0)                      # speaker L x W x H
 TOF = (25.0, 10.7, 1.6)                     # GY-530 PCB L x W x T
 
@@ -188,13 +187,6 @@ def back_cover():
     for x, y in BUTTONS:
         plate = plate.cut(wp(Z_BO - 0.1).center(x, y).circle(1.0).extrude(BACK_T + 0.2))
 
-    # Battery cradle (gap on the bottom-right side for the lead to the BAT socket).
-    bl, bw = BAT[0] + 0.8, BAT[1] + 0.8
-    cradle = (wp(Z_BI).center(CX, 0).rect(bl + 2 * RIB, bw + 2 * RIB).extrude(4.0)
-              .cut(wp(Z_BI - 0.1).center(CX, 0).rect(bl, bw).extrude(4.2)))
-    cradle = cradle.cut(wp(Z_BI - 0.1).center(CX + bl / 2 - 6, -bw / 2).rect(10, 4).extrude(4.2))
-    plate = plate.union(cradle)
-
     # Keyholes + closed hoods behind them so a screw head never touches parts.
     slot_len = (KEY_TOP_Y - KEY_BIG_Y) + KEY_SLOT_W
     hood_len = (KEY_TOP_Y - KEY_BIG_Y) + HOOD_W
@@ -249,11 +241,10 @@ def stand():
 
 # ── Placeholders for the internal parts (preview + interference check) ─────
 def placeholders():
-    bat = wp(Z_BI + 0.2).center(CX, 0).rect(BAT[0], BAT[1]).extrude(BAT[2])
     spk = wp(Z_FI - SPK[2]).center(CX, SPK_Y).rect(SPK[0], SPK[1]).extrude(SPK[2])
     tof = wp(Z_FI - 1.5 - TOF[2]).center(CX, TOF_Y).rect(TOF[0], TOF[1]).extrude(TOF[2])
     tof = tof.union(wp(Z_FI - 1.5).center(CX, TOF_Y).rect(4.4, 2.4).extrude(1.0))  # sensor
-    return {"battery": bat, "speaker": spk, "tof": tof}
+    return {"speaker": spk, "tof": tof}
 
 
 def board_solids():

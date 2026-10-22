@@ -16,3 +16,12 @@ void buzzerTone(int freqHz, int durationMs);  // blocking, short beeps only
 void buzzerAccept();                          // stable-reading chirp (rising)
 void buzzerReject();                          // rejected-reading tone (low)
 void buzzerClick();                           // tiny touch tick
+
+// Short melodies: sine tones with attack/decay envelopes, pitch glides and tone
+// colours (glass, marimba, chorus), synthesised on the ESP32 DAC (speaker on
+// GPIO25/26) so notes ring together. Falls back to square tones on other pins.
+// Blocking (~1-2.5 s). Volume follows buzzerSetLevel().
+int  buzzerMelodyCount();
+const char *buzzerMelodyName(int id);
+void buzzerMelody(int id);
+void buzzerBoot();                            // the boot melody ("Rise")

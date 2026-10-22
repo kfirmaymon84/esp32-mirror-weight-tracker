@@ -122,9 +122,9 @@ def main():
         t = t.copy(); t[:, :, 2] += dz; return t
     items = [(off(T_shell, 0), DARK), (off(T_board, -30), GREEN),
              (off(T_ph["tof"], 0), ORANGE), (off(T_ph["speaker"], 0), ORANGE),
-             (off(T_ph["battery"], -55), ORANGE), (off(T_cover, -75), MID)]
+             (off(T_cover, -60), MID)]
     render(items, os.path.join(OUT, "preview_exploded.png"), 25, -62,
-           "Exploded - front shell / board / battery / back cover", size=(9, 9))
+           "Exploded - front shell / board / back cover", size=(9, 9))
 
     # 4. Back cover, outside.
     render([(T_cover, MID)], os.path.join(OUT, "preview_back.png"), 180, 180 - 25,
