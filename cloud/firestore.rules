@@ -1,0 +1,52 @@
+rules_version = '2';
+
+// Smart Mirror: every user owns users/{uid} and everything below it; nobody
+// else can read or write it. Readings are validated so a bad client can't
+// store junk. Paste into Firebase console > Firestore > Rules > Publish.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    match /users/{uid} {
+      allow read, write: if isOwner(uid);
+
+      // One document per weigh-in; the document id is the epoch time (ts), so
+      // re-sending the same reading overwrites it instead of duplicating it.
+      // "at" is the same moment as a Firestore timestamp (readable in the
+      // console, sortable/filterable by apps).
+      match /readings/{ts} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if isOwner(uid)
+          && request.resource.data.keys().hasOnly(['ts', 'at', 'kg', 'src'])
+          && request.resource.data.ts is int
+          && string(request.resource.data.ts) == ts
+          && request.resource.data.at is timestamp
+          && request.resource.data.at == timestamp.value(request.resource.data.ts * 1000)
+          && request.resource.data.kg is number
+          && request.resource.data.kg > 1 && request.resource.data.kg < 400;
+      }
+
+      // The user's settings, shared by their devices: one "profile" document.
+      // Listed explicitly: a catch-all {rest=**} would also match readings and
+      // bypass their validation (any matching rule that allows, allows).
+      match /settings/{doc} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if isOwner(uid) && doc == 'profile'
+          && request.resource.data.keys().hasOnly(
+               ['unit', 'sound', 'goalKg', 'heightCm', 'updatedTs', 'updatedAt'])
+          && request.resource.data.unit in ['kg', 'lb']
+          && request.resource.data.sound is int
+          && request.resource.data.sound >= 0 && request.resource.data.sound <= 3
+          && request.resource.data.goalKg is number
+          && request.resource.data.goalKg >= 0 && request.resource.data.goalKg < 400
+          && request.resource.data.heightCm is number
+          && request.resource.data.heightCm >= 0 && request.resource.data.heightCm <= 250
+          && request.resource.data.updatedTs is int
+          && request.resource.data.updatedAt == timestamp.value(request.resource.data.updatedTs * 1000);
+      }
+    }
+  }
+}

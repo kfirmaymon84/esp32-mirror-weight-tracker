@@ -26,4 +26,17 @@ uint32_t heartbeat();              // millis() of the scan task's last tick (wat
 void setLearnedMac(const char *mac);
 const char *learnedMac();          // "aa:bb:cc:dd:ee:ff" or "" if none yet
 
+// Pairing: every OKOK scale heard recently (any MAC), strongest signal first.
+// A scale only broadcasts while someone stands on it, so the user steps on
+// theirs to make it appear. While pairing is on, no weights are reported.
+struct Nearby {
+  char mac[18];
+  int rssi;                        // dBm
+  float kg;                        // last weight it broadcast
+  uint32_t seenMs;                 // millis() when last heard
+};
+int nearby(Nearby *out, int max, uint32_t maxAgeMs);
+void setPairing(bool on);
+constexpr bool canPair() { return true; }
+
 }  // namespace OkokScale

@@ -33,6 +33,7 @@
 #include "config.h"
 #include "halo_fonts.h"
 #include "history.h"
+#include "ota_update.h"
 #include "scale.h"
 #include "timekeeper.h"
 
@@ -105,18 +106,18 @@ static const int RAIL_BTN_Y0 = 62, RAIL_BTN_PITCH = 68;
 
 // ── UI state ────────────────────────────────────────────────────────────────
 enum Screen { SCR_HOME = 0, SCR_TRENDS = 1, SCR_SETTINGS = 2 };
-enum Mode { MODE_RAIL, MODE_MEASURE, MODE_RESULT, MODE_CONFIRM, MODE_NIGHT };
+enum Mode { MODE_RAIL, MODE_MEASURE, MODE_RESULT, MODE_CONFIRM, MODE_NIGHT, MODE_PAIR,
+            MODE_ACCOUNT };
 static int screen = SCR_HOME;           // rail screen; Home is the resting screen
 static int mode = MODE_RAIL;            // what fills the display
 static int lastPullN = -2;              // -2 never, -1 failed, >=0 readings pulled
-static time_t lastSyncAt = 0;           // last successful sheet push/pull (epoch)
+static time_t lastSyncAt = 0;           // last successful account sync (epoch)
 static bool syncing = false;            // cloud flush in progress (Wi-Fi icon cyan)
 
 // ── Settings (persisted in NVS) ─────────────────────────────────────────────
 static bool  setUnitLb = false;         // display kg (false) or lb (true)
 static int   setSound  = SOUND_MID;     // speaker volume: Off / Low / Mid / High
 static float setGoalKg = 0;             // goal weight in kg (0 = none)
-static float setGoalStartKg = 0;        // weight when the goal was set (ring 0 %)
 #if defined(SCALE_S200)
 static const float HEIGHT_DEFAULT_CM = USER_HEIGHT_CM;   // personal build: owner's height
 #else
@@ -124,6 +125,10 @@ static const float HEIGHT_DEFAULT_CM = 0;                // product: unset until
 #endif
 static float setHeightCm = 0;           // body height for BMI (0 = not set)
 static String savedScaleMac;            // scale MAC as stored in NVS
+// Units / sound / goal / height also live in the account (users/<uid>/settings/
+// profile): changed here = dirty until uploaded; the newer side wins on sync.
+static uint32_t setUpdated = 0;         // epoch of the last change on this device
+static bool setDirty = false;           // changed since the last upload
 
 // Settings tiles (2 columns x 4 rows), each a touch target.
 enum MenuItem { MI_SYNC, MI_UNIT, MI_GOAL, MI_HEIGHT, MI_SOUND, MI_CALIBRATE, MI_SCALE,
@@ -153,9 +158,18 @@ static bool wantOta = false;                 // request to enter OTA mode (from 
 static uint32_t otaUntil = 0;
 static const uint32_t OTA_WINDOW_MS = 300000;  // 5 min listen window
 
+// Online updates (product builds): checked soon after boot, then every 12 h
+// (1 h after a failed check), only after the display has been dark 10 min.
+static char otaNote[20] = "";                // Settings tile: "Up to date", ...
+static uint32_t lastOtaCheckMs = 0;
+static uint32_t otaIntervalMs = 0;           // 0 = not checked yet this boot
+static const uint32_t OTA_FIRST_CHECK_MS = 120000;
+static const uint32_t OTA_IDLE_MS = 600000;  // display dark this long before a check
+
 // Watchdog: an independent task reboots the device if the main loop or the
 // scale task stops ticking (a hang), so a wall-mounted unit recovers itself.
 static volatile uint32_t mainTick = 0;
+static volatile uint32_t wdtGraceUntil = 0;  // long blocking jobs (update) pause it
 static const uint32_t MAIN_STALL_MS = 60000;   // main loop silent this long → reboot
 static const uint32_t BLE_STALL_MS  = 150000;  // scale task silent this long → reboot
 
@@ -164,21 +178,29 @@ static void settingsLoad() {
   prefs.begin("mirror", true);
   setUnitLb = prefs.getBool("unit", false);
   setSound  = prefs.getInt("sound", SOUND_MID);
-  setGoalKg = prefs.getFloat("goal", 0);
-  setGoalStartKg = prefs.getFloat("goalst", 0);
-  setHeightCm = prefs.getFloat("height", HEIGHT_DEFAULT_CM);
+  // getFloat() logs an error for a key a new device hasn't saved yet: check first.
+  setGoalKg = prefs.isKey("goal") ? prefs.getFloat("goal", 0) : 0;
+  setHeightCm = prefs.isKey("height") ? prefs.getFloat("height", 0) : HEIGHT_DEFAULT_CM;
   savedScaleMac = prefs.getString("scalemac", "");
+  setUpdated = prefs.getUInt("setts", 0);
+  setDirty = prefs.getBool("setdirty", false);
   prefs.end();
   buzzerSetLevel(setSound);
 }
-static void settingsSave() {
+static void settingsStore() {           // persist as they are (no "changed" mark)
   prefs.begin("mirror", false);
   prefs.putBool("unit", setUnitLb);
   prefs.putInt("sound", setSound);
   prefs.putFloat("goal", setGoalKg);
-  prefs.putFloat("goalst", setGoalStartKg);
   prefs.putFloat("height", setHeightCm);
+  prefs.putUInt("setts", setUpdated);
+  prefs.putBool("setdirty", setDirty);
   prefs.end();
+}
+static void settingsSave() {            // the user changed a setting on this device
+  setUpdated = timeIsSet() ? (uint32_t)nowEpoch() : 0;
+  setDirty = true;
+  settingsStore();
 }
 static void scaleMacSave(const char *mac) {
   prefs.begin("mirror", false);
@@ -190,7 +212,7 @@ static void scaleMacSave(const char *mac) {
 // Touch calibration persistence (5 x uint16 blob in NVS, per-board key).
 static void calLoad() {
   prefs.begin("mirror", true);
-  if (prefs.getBytesLength(TOUCH_CAL_KEY) == sizeof(calData))
+  if (prefs.isKey(TOUCH_CAL_KEY) && prefs.getBytesLength(TOUCH_CAL_KEY) == sizeof(calData))
     prefs.getBytes(TOUCH_CAL_KEY, calData, sizeof(calData));
   prefs.end();
   tft.setTouch(calData);
@@ -759,10 +781,11 @@ static bool goodDir(float delta) {
   return delta < 0;
 }
 
-// Goal progress 0..1 (latest weight between the start weight and the goal).
+// Goal progress 0..1: how far the latest weight has come from the first
+// weigh-in toward the goal (the whole journey; changing the goal never resets it).
 static float goalProgress() {
   if (setGoalKg <= 0 || historyCount() == 0) return -1;
-  float start = setGoalStartKg > 0 ? setGoalStartKg : historyAt(0).kg;
+  float start = historyAt(0).kg;
   float cur = historyLast().kg;
   float span = start - setGoalKg;
   if (fabsf(span) < 0.05f) return 1;
@@ -1296,10 +1319,12 @@ static void tileText(int i, int tx, const char *lab, const char *val, uint16_t v
   text(val, vx, y + TILE_VAL_Y, ML_DATUM, vc, C_PANEL);
 }
 
-// Sheet tile status line; returns its dot colour.
+// Account tile status line; returns its dot colour.
 static char drawnSync[32] = "";
 static int syncStatus(char *v, size_t n) {
-  if (!cloudConfigured()) { snprintf(v, n, "Off"); return C_TEXT3; }
+  if (!cloudAvailable()) { snprintf(v, n, "Off"); return C_TEXT3; }
+  if (cloudSignInLost()) { snprintf(v, n, "Sign in again"); return C_AMBER; }
+  if (!cloudConfigured()) { snprintf(v, n, "Sign in"); return C_TEXT3; }
   if (lastPullN == -1) { snprintf(v, n, "Sync failed"); return C_AMBER; }
   if (cloudPendingCount() > 0) { snprintf(v, n, "%d to sync", cloudPendingCount()); return C_TEXT2; }
   if (lastSyncAt > 0 && timeIsSet()) {
@@ -1321,7 +1346,7 @@ static void drawSettingTile(int i) {
     case MI_SYNC: {
       int tx = tileFrame(i, IC_CLOUD);
       int dot = syncStatus(drawnSync, sizeof(drawnSync));
-      tileText(i, tx, "Google Sheet", drawnSync, C_TEXT, dot);
+      tileText(i, tx, "Account", drawnSync, C_TEXT, dot);
     } break;
     case MI_UNIT: {
       int tx = tileFrame(i, IC_RULER);
@@ -1401,13 +1426,17 @@ static void drawSettingTile(int i) {
       if (mac[0]) {
         snprintf(v, sizeof(v), "%.8s", mac + 9);   // last 3 bytes
         for (char *c = v; *c; c++) *c = toupper((unsigned char)*c);
-      } else snprintf(v, sizeof(v), "Auto");
-      // Tapping forgets the paired scale; the next one to lock a reading is learned.
+      } else snprintf(v, sizeof(v), "Pair");
+      // Tapping opens the pairing screen (scan + pick); unpaired = first one is learned.
       tileText(i, tileFrame(i, IC_SCALE),
-               mac[0] ? "Scale \xC2\xB7 paired" : "Scale \xC2\xB7 learns first", v, C_TEXT);
+               mac[0] ? "Scale \xC2\xB7 paired" : "Scale \xC2\xB7 any", v, C_TEXT);
     } break;
     case MI_OTA:
-      tileText(i, tileFrame(i, IC_DOWNLOAD), "Firmware " FW_VERSION, "Update", C_TEXT);
+      if (otaAutoEnabled())       // online updates: tap = check (and install) now
+        tileText(i, tileFrame(i, IC_DOWNLOAD), "Firmware " FW_VERSION " \xC2\xB7 auto",
+                 otaNote[0] ? otaNote : "Check now", C_TEXT);
+      else                        // web upload from a computer on the same Wi-Fi
+        tileText(i, tileFrame(i, IC_DOWNLOAD), "Firmware " FW_VERSION, "Update", C_TEXT);
       break;
     case MI_WIFI:
       if (wifiSavedSsid()[0]) snprintf(l, sizeof(l), "Wi-Fi \xC2\xB7 %.10s", wifiSavedSsid());
@@ -1700,15 +1729,20 @@ static void drawNight() {
 }
 
 // ── Wi-Fi setup (captive portal open) ───────────────────────────────────────
-static void drawSetup(const char *ap) {
+// accountOnly: opened from Settings → Account to sign in (Wi-Fi already set).
+static void drawSetup(const char *ap, bool accountOnly) {
   tft.fillScreen(C_INK);
   const int x = 28, colW = 288 - 24 - x;
   useFont(F_I11B);
-  label("SETUP \xC2\xB7 STEP 1 OF 2", x, 52, 0, C_MINT, C_INK);
+  label(accountOnly ? "SETTINGS \xC2\xB7 ACCOUNT" : "SETUP", x, 52, 0, C_MINT, C_INK);
   useFont(F_I22B);
-  text("Connect to Wi-Fi", x, 78, TL_DATUM, C_TEXT, C_INK);
-  static const char *STEPS[3] = {"Scan the code with your phone camera", "Pick your home network",
-                                 "Optional: link a Google Sheet"};
+  text(accountOnly ? "Sign in" : "Connect to Wi-Fi", x, 78, TL_DATUM, C_TEXT, C_INK);
+  static const char *SETUP[3] = {"Scan the code with your phone camera", "Pick your home Wi-Fi",
+                                 cloudAvailable() ? "Sign in or create your account (optional)"
+                                                  : "Save: the mirror carries on by itself"};
+  static const char *SIGNIN[3] = {"Scan the code with your phone camera", "Tap Setup",
+                                  "Sign in or create your account, then Save"};
+  const char *const *STEPS = accountOnly ? SIGNIN : SETUP;
   int y = 120;
   for (int i = 0; i < 3; i++) {
     tft.fillSmoothCircle(x + 10, y + 10, 10, C_CHIP, C_INK);
@@ -1763,6 +1797,293 @@ static void renderContent() {   // rail content area (the rail itself stays)
   else drawSettings();
 }
 
+// ── Scale pairing (Settings → Scale) ────────────────────────────────────────
+// Lists the OKOK scales heard in the last few seconds; a scale only broadcasts
+// while someone stands on it. Tap one to pair it; the device then ignores all
+// other scales (e.g. a neighbour's). "Forget" goes back to learning the first.
+static const int PR_X = 28, PR_W = SCR_W - 56, PR_Y0 = 98, PR_H = 38, PR_GAP = 6, PR_ROWS = 4;
+static const int PB_Y = 280, PB_H = 34, PB_CW = 110, PB_FW = 150;   // Cancel / Forget buttons
+static const uint32_t PAIR_MS = 120000;        // closes itself after 2 min
+static Scale::Nearby pairList[PR_ROWS];
+static int pairN = 0;
+static char pairDrawn[PR_ROWS][48];            // what each row shows (redraw on change)
+static uint32_t pairUntil = 0, lastPairPoll = 0;
+
+static int signalBars(int rssi) { return rssi > -60 ? 4 : rssi > -70 ? 3 : rssi > -80 ? 2 : 1; }
+
+static void macTail(const char *mac, char *out, size_t n) {   // "88:E8" style tail
+  snprintf(out, n, "%.8s", mac + 9);
+  for (char *c = out; *c; c++) *c = toupper((unsigned char)*c);
+}
+
+static void drawPairRow(int i) {
+  char key[48] = "";
+  if (i < pairN)
+    snprintf(key, sizeof(key), "%s|%.1f|%d|%d", pairList[i].mac, pairList[i].kg,
+             signalBars(pairList[i].rssi), strcmp(pairList[i].mac, Scale::learnedMac()) == 0);
+  else if (i == 0) snprintf(key, sizeof(key), "empty");
+  if (strcmp(key, pairDrawn[i]) == 0) return;
+  strcpy(pairDrawn[i], key);
+
+  int y = PR_Y0 + i * (PR_H + PR_GAP);
+  tft.fillRect(PR_X, y, PR_W, PR_H, C_INK);
+  if (i >= pairN) {
+    if (i == 0) {
+      useFont(F_I13);
+      text("Looking for scales\xE2\x80\xA6", SCR_W / 2, y + PR_H / 2, MC_DATUM, C_TEXT3, C_INK);
+    }
+    return;
+  }
+  const Scale::Nearby &s = pairList[i];
+  bool paired = strcmp(s.mac, Scale::learnedMac()) == 0;
+  tft.fillSmoothRoundRect(PR_X, y, PR_W, PR_H, 10, paired ? C_MINT : C_LINE, C_INK);
+  tft.fillSmoothRoundRect(PR_X + 1, y + 1, PR_W - 2, PR_H - 2, 9, C_INK, paired ? C_MINT : C_LINE);
+  icon(IC_SCALE, PR_X + 12, y + 10, 18, paired ? C_MINT : C_TEXT2, C_INK);
+  char t[32], tail[12];
+  macTail(s.mac, tail, sizeof(tail));
+  snprintf(t, sizeof(t), "Scale %s", tail);
+  useFont(F_I15B);
+  int w = text(t, PR_X + 40, y + PR_H / 2, ML_DATUM, C_TEXT, C_INK);
+  if (paired) {
+    useFont(F_I11B);
+    label("PAIRED", PR_X + 40 + w + 10, y + PR_H / 2 - 6, 0, C_MINT, C_INK);
+  }
+  snprintf(t, sizeof(t), "%.1f %s", toDisp(s.kg), unitStr());
+  useFont(F_I13);
+  text(t, PR_X + PR_W - 52, y + PR_H / 2, MR_DATUM, C_TEXT2, C_INK);
+  int bars = signalBars(s.rssi);
+  for (int b = 0; b < 4; b++) {
+    int bh = 5 + b * 4, bx = PR_X + PR_W - 40 + b * 7;
+    tft.fillRect(bx, y + PR_H / 2 + 8 - bh, 4, bh, b < bars ? C_MINT : C_BTNEDGE);
+  }
+}
+
+static void drawPairButtons() {
+  tft.fillRect(PR_X, PB_Y, PR_W, PB_H, C_INK);
+  tft.fillSmoothRoundRect(PR_X, PB_Y, PB_CW, PB_H, 10, C_CHIP, C_INK);
+  useFont(F_I15B);
+  text("Done", PR_X + PB_CW / 2, PB_Y + PB_H / 2, MC_DATUM, C_TEXT, C_CHIP);
+  if (Scale::learnedMac()[0]) {
+    int fx = PR_X + PR_W - PB_FW;
+    tft.fillSmoothRoundRect(fx, PB_Y, PB_FW, PB_H, 10, C_CHIP, C_INK);
+    text("Forget scale", fx + PB_FW / 2, PB_Y + PB_H / 2, MC_DATUM, C_AMBER, C_CHIP);
+  }
+}
+
+static void drawPair() {
+  useFont(F_I11B);
+  label("SETTINGS \xC2\xB7 SCALE", PR_X, 22, 0, C_MINT, C_INK);
+  useFont(F_I22B);
+  text("Pair your scale", PR_X, 40, TL_DATUM, C_TEXT, C_INK);
+  useFont(F_I13);
+  text("Step on it to wake it up, then tap it below.", PR_X, 72, TL_DATUM, C_TEXT2, C_INK);
+  for (int i = 0; i < PR_ROWS; i++) {
+    pairDrawn[i][0] = '\x01';                      // force every row to draw
+    drawPairRow(i);
+  }
+  drawPairButtons();
+}
+
+static void openPair() {
+  Scale::setPairing(true);
+  pairN = 0;
+  pairUntil = millis() + PAIR_MS;
+  mode = MODE_PAIR;
+  dirty = true;
+}
+
+static void closePair() {
+  Scale::setPairing(false);
+  mode = MODE_RAIL;
+  screen = SCR_SETTINGS;
+  dirty = true;
+}
+
+static void handlePairTap(int tx, int ty) {
+  if (ty >= PB_Y - 6) {
+    if (tx < PR_X + PB_CW + 6) closePair();
+    else if (Scale::learnedMac()[0] && tx > PR_X + PR_W - PB_FW - 6) {
+      Scale::setLearnedMac("");
+      scaleMacSave("");
+      Serial.println("[okok] scale forgotten - will learn the next one");
+      drawPairButtons();
+      for (int i = 0; i < PR_ROWS; i++) drawPairRow(i);
+    }
+    return;
+  }
+  int i = (ty - PR_Y0) / (PR_H + PR_GAP);
+  if (ty < PR_Y0 || i >= pairN) return;
+  Scale::setLearnedMac(pairList[i].mac);
+  scaleMacSave(pairList[i].mac);
+  Serial.printf("[okok] paired scale %s\n", pairList[i].mac);
+  buzzerAccept();
+  drawPairRow(i);
+  drawPairButtons();
+  delay(700);
+  closePair();
+}
+
+// ── Account (Settings → Account) ────────────────────────────────────────────
+// Signed in: email + sync state, Sync now / Sign out (tap twice). Signed out:
+// Sign in opens the phone setup page with only the account fields.
+static const int AC_X = 28, AB_Y = 272, AB_H = 36;
+static const int AB_DONE_X = 28, AB_DONE_W = 110, AB_MAIN_X = 150, AB_MAIN_W = 150;
+static const int AB_OUT_X = 312, AB_OUT_W = 140;
+static bool acConfirmOut = false;            // "Sign out" tapped once → confirm
+static char acNote[80] = "";                 // result of the last action
+static bool acNoteOk = true;
+
+static void acButton(int x, int w, const char *t, uint16_t fg) {
+  tft.fillSmoothRoundRect(x, AB_Y, w, AB_H, 10, C_CHIP, C_INK);
+  useFont(F_I15B);
+  text(t, x + w / 2, AB_Y + AB_H / 2, MC_DATUM, fg, C_CHIP);
+}
+
+static void drawAccount() {
+  tft.fillRect(0, 0, SCR_W, SCR_H, C_INK);
+  useFont(F_I11B);
+  label("SETTINGS \xC2\xB7 ACCOUNT", AC_X, 22, 0, C_MINT, C_INK);
+  useFont(F_I22B);
+  text("Your account", AC_X, 40, TL_DATUM, C_TEXT, C_INK);
+  bool in = cloudConfigured();
+  int y = 92;
+  if (in) {
+    useFont(F_I15B);
+    text(cloudEmail(), AC_X, y, TL_DATUM, C_TEXT, C_INK, SCR_W - 2 * AC_X);
+    char v[32];
+    uint16_t c = syncStatus(v, sizeof(v));
+    useFont(F_I13);
+    text(v, AC_X, y + 30, TL_DATUM, c, C_INK);
+  } else {
+    const char *why = cloudSignInLost()
+        ? "Your sign-in has expired. Sign in again to keep your weigh-ins syncing."
+        : "Sign in to keep your weigh-ins in your account: safe, and on any new device.";
+    textWrap(why, AC_X, y, SCR_W - 2 * AC_X, 19, C_TEXT2, C_INK, 3);
+  }
+  if (acNote[0]) {
+    useFont(F_I13);
+    textWrap(acNote, AC_X, 196, SCR_W - 2 * AC_X, 19, acNoteOk ? C_MINT : C_AMBER, C_INK, 2);
+  }
+  acButton(AB_DONE_X, AB_DONE_W, "Done", C_TEXT);
+  acButton(AB_MAIN_X, AB_MAIN_W, in ? "Sync now" : "Sign in", C_TEXT);
+  if (in) acButton(AB_OUT_X, AB_OUT_W, acConfirmOut ? "Sure? Tap" : "Sign out", C_AMBER);
+}
+
+static void openAccount() {
+  acConfirmOut = false;
+  acNote[0] = 0;
+  mode = MODE_ACCOUNT;
+  dirty = true;
+}
+
+// Settings follow the account. The newer side wins; right after signing in the
+// account wins (signing in on a device makes it yours). An account without
+// settings yet gets this device's. Leaves WiFi off. True if the account was reached.
+static bool settingsSync(bool accountWins) {
+  if (!cloudConfigured()) return false;
+  UserSettings c;
+  bool found = false;
+  bool ok = cloudPullSettings(c, found);
+  bool takeAccount = found && (accountWins || c.updated > setUpdated);
+  // Changed here before the clock was set (no time to compare): keep the change.
+  if (setDirty && !setUpdated && !accountWins) takeAccount = false;
+  if (ok && takeAccount) {
+    setUnitLb = c.lb;
+    setSound = c.sound;
+    setGoalKg = c.goalKg;
+    setHeightCm = c.heightCm;
+    setUpdated = c.updated;
+    setDirty = false;
+    settingsStore();
+    buzzerSetLevel(setSound);
+    dirty = true;                                  // units / goal / BMI shown everywhere
+    Serial.println("[cloud] settings taken from the account");
+  } else if (ok && (setDirty || !found)) {
+    UserSettings s;
+    s.lb = setUnitLb;
+    s.sound = setSound;
+    s.goalKg = setGoalKg;
+    s.heightCm = setHeightCm;
+    s.updated = setUpdated ? setUpdated : (timeIsSet() ? (uint32_t)nowEpoch() : 0);
+    if (cloudPushSettings(s)) {
+      setUpdated = s.updated;
+      setDirty = false;
+      settingsStore();
+    } else {
+      ok = false;
+    }
+  }
+  wifiOff();
+  return ok;
+}
+
+// Upload what's queued, then take the account's history (and settings) locally.
+// justSignedIn: the account's settings win over this device's.
+static void syncNow(bool justSignedIn = false) {
+  wdtGraceUntil = millis() + 120000;
+  if (cloudHasPending()) cloudFlush();
+  lastPullN = cloudPull();
+  if (lastPullN >= 0) lastSyncAt = nowEpoch();
+  settingsSync(justSignedIn);
+  wdtGraceUntil = 0;
+  mainTick = millis();
+}
+
+static void handleAccountTap(int tx, int ty) {
+  if (ty < AB_Y - 6) return;
+  if (tx < AB_DONE_X + AB_DONE_W + 6) {                       // Done
+    mode = MODE_RAIL;
+    screen = SCR_SETTINGS;
+    dirty = true;
+  } else if (tx < AB_MAIN_X + AB_MAIN_W + 6) {                // Sync now / Sign in
+    acConfirmOut = false;
+    if (cloudConfigured()) {
+      snprintf(acNote, sizeof(acNote), "Syncing\xE2\x80\xA6");
+      acNoteOk = true;
+      drawAccount();
+      syncNow();
+      acNoteOk = lastPullN >= 0;
+      snprintf(acNote, sizeof(acNote), acNoteOk ? "Synced: %d weigh-ins in your account"
+                                                : "Couldn't reach your account. Try again later.",
+               lastPullN);
+    } else {
+      wdtGraceUntil = millis() + 200000;                      // the page waits up to 3 min
+      bool saved = accountPortal([]() { mainTick = millis(); });
+      bool ok = false;
+      const char *m = accountSetupMessage(&ok);
+      if (saved && ok && cloudConfigured()) syncNow(true);    // offline readings up, history down
+      snprintf(acNote, sizeof(acNote), "%s", saved ? m : "Sign-in page closed");
+      acNoteOk = saved && ok;
+      wdtGraceUntil = 0;
+      mainTick = millis();
+    }
+    dirty = true;
+  } else if (cloudConfigured() && tx >= AB_OUT_X - 6) {      // Sign out (tap twice)
+    if (!acConfirmOut) {
+      acConfirmOut = true;
+      acButton(AB_OUT_X, AB_OUT_W, "Sure? Tap", C_AMBER);
+      return;
+    }
+    acConfirmOut = false;
+    wdtGraceUntil = millis() + 90000;
+    if (setDirty) settingsSync(false);              // don't lose a change made here
+    cloudSignOut();
+    // The personal settings leave with the account (units / sound stay).
+    setGoalKg = 0;
+    setHeightCm = HEIGHT_DEFAULT_CM;
+    setUpdated = 0;
+    setDirty = false;
+    settingsStore();
+    wdtGraceUntil = 0;
+    mainTick = millis();
+    lastSyncAt = 0;
+    lastPullN = 0;
+    snprintf(acNote, sizeof(acNote), "Signed out. This device's weigh-ins and goal were cleared.");
+    acNoteOk = true;
+    dirty = true;
+  }
+}
+
 static void render() {          // whole screen for the current mode
   tft.fillScreen(C_INK);
   switch (mode) {
@@ -1771,6 +2092,8 @@ static void render() {          // whole screen for the current mode
     case MODE_RESULT: drawResult(); break;
     case MODE_CONFIRM: drawConfirm(); break;
     case MODE_NIGHT: drawNight(); break;
+    case MODE_PAIR: drawPair(); break;
+    case MODE_ACCOUNT: drawAccount(); break;
   }
 }
 
@@ -1793,6 +2116,7 @@ static const int BL_CH = 6;                 // LEDC channel (buzzer uses 4)
 static const uint8_t BL_DAY = 255, BL_NIGHT_GLANCE = 38, BL_NIGHT_USE = 100;
 static bool displayOn = true;
 static uint32_t lastWakeMs = 0;
+static uint32_t sleptAtMs = 0;              // when the display last went dark
 
 static void backlightBegin() {
   ledcSetup(BL_CH, 5000, 8);
@@ -1820,6 +2144,8 @@ static void displayWake(bool byTouch = false) {
   if (!displayOn) {
     displayOn = true;
     bool night = quietHours();
+    Serial.printf("[disp] wake (%s%s)\n", byTouch ? "touch" : "presence/scale",
+                  night ? ", quiet hours" : "");
     if (night && byTouch) {
       mode = MODE_NIGHT;
       backlight(BL_NIGHT_GLANCE);
@@ -1835,6 +2161,8 @@ static void displayWake(bool byTouch = false) {
 static void displaySleep() {
   if (displayOn) {
     displayOn = false;
+    sleptAtMs = millis();
+    Serial.println("[disp] sleep");
     tft.fillScreen(C_INK);
     backlight(0);                    // real backlight off on this board
     mode = MODE_RAIL;                // wake → Home, the resting screen
@@ -1842,18 +2170,22 @@ static void displaySleep() {
   }
 }
 
-static void recordStable(float kg) {
+// Show a final reading on the Result screen; save = store + queue it for sync
+// (false for a repeat of the reading just saved: shown again, not stored twice).
+static void recordStable(float kg, bool save = true) {
   uint32_t ts = timeIsSet() ? (uint32_t)nowEpoch() : 0;
   resultBegin(kg, ts);
-  historyAdd(ts, kg);
-  cloudQueue(ts, kg);   // queue for Google Sheet sync (flushed when idle)
+  if (save) {
+    historyAdd(ts, kg);
+    cloudQueue(ts, kg);   // queue for the account upload (flushed when idle)
+  }
   resultFinish();
   liveKg = kg;
   liveState = 2;
   ledGreenUntil = millis() + 5000;
   buzzerAccept();
-  Serial.printf("[ui] stored %.2f kg trend=%.2f streak=%d\n", kg, historyTrendLast(),
-                res.streak);
+  Serial.printf("[ui] %s %.2f kg trend=%.2f streak=%d\n", save ? "stored" : "shown (repeat)",
+                kg, historyTrendLast(), res.streak);
   resultUntil = millis() + RESULT_SHOW_MS;
   enterMode(MODE_RESULT);
 }
@@ -1924,7 +2256,7 @@ static void diagPrint() {
                 (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
                 historyCount(), historyCount() ? historyLast().kg : 0.0,
                 Scale::learnedMac()[0] ? Scale::learnedMac() : "auto",
-                cloudConfigured() ? "sheet" : "off",
+                cloudConfigured() ? cloudEmail() : cloudAvailable() ? "signed out" : "off",
                 WiFi.status() == WL_CONNECTED, (int)WiFi.RSSI(), lastPullN);
 }
 
@@ -1997,12 +2329,73 @@ static void startOtaMode() {
                 WiFi.localIP().toString().c_str(), OTA_WINDOW_MS / 1000);
 }
 
+// ── Online update (product builds) ───────────────────────────────────────────
+static void showBusy(const char *msg);
+static const int UPD_BX = 28, UPD_BW = SCR_W - 56, UPD_BY = 196, UPD_BH = 10;
+
+static void drawUpdating(const char *version) {
+  tft.fillScreen(C_INK);
+  useFont(F_I11B);
+  label("FIRMWARE UPDATE", UPD_BX, 60, 0, C_MINT, C_INK);
+  char t[40];
+  snprintf(t, sizeof(t), "Updating to %s", version);
+  useFont(F_I22B);
+  text(t, UPD_BX, 82, TL_DATUM, C_TEXT, C_INK);
+  useFont(F_I13);
+  text("Keep it plugged in. It restarts by itself.", UPD_BX, 122, TL_DATUM, C_TEXT2, C_INK);
+  tft.fillSmoothRoundRect(UPD_BX, UPD_BY, UPD_BW, UPD_BH, UPD_BH / 2, C_TRACK, C_INK);
+}
+
+static void drawUpdateProgress(int pct) {
+  int w = UPD_BW * pct / 100;
+  if (w >= UPD_BH) tft.fillSmoothRoundRect(UPD_BX, UPD_BY, w, UPD_BH, UPD_BH / 2, C_MINT, C_TRACK);
+  char t[8];
+  snprintf(t, sizeof(t), "%d%%", pct);
+  useFont(F_I13);
+  text(t, UPD_BX + UPD_BW, UPD_BY + 28, TR_DATUM, C_TEXT2, C_INK, 50);
+}
+
+// Check the latest release and install it when it's newer. Interactive (the
+// Settings tile) shows each step; the automatic run happens with the display
+// off and leaves no trace on screen unless it restarts into the new firmware.
+static void runUpdate(bool interactive) {
+  wdtGraceUntil = millis() + 240000;     // WiFi + download can block for a while
+  if (interactive) showBusy("Checking for updates\xE2\x80\xA6");
+  OtaRelease rel;
+  OtaResult r = otaCheck(rel);
+  bool installed = false;
+  if (r == OTA_AVAILABLE) {
+    if (interactive) drawUpdating(rel.version);
+    installed = otaInstall(rel, [interactive](int pct) {
+      mainTick = millis();
+      if (interactive) drawUpdateProgress(pct);
+    });
+  }
+  wifiOff();
+  lastOtaCheckMs = millis();
+  otaIntervalMs = r == OTA_FAILED || (r == OTA_AVAILABLE && !installed) ? 3600000UL : 43200000UL;
+  if (installed) {
+    if (interactive) fullMessage("Updated \xC2\xB7 restarting", C_MINT);
+    delay(800);
+    ESP.restart();
+  }
+  snprintf(otaNote, sizeof(otaNote), "%s", r == OTA_UP_TO_DATE ? "Up to date"
+                                          : r == OTA_AVAILABLE ? "Update failed" : "Check failed");
+  mainTick = millis();
+  wdtGraceUntil = 0;
+  if (interactive) {
+    if (r != OTA_UP_TO_DATE) buzzerReject();
+    dirty = true;                        // the busy / progress screens covered the UI
+  }
+}
+
 // Independent watchdog: reboots if the main loop or scale task stops ticking.
 static void watchdogTask(void *) {
   vTaskDelay(pdMS_TO_TICKS(20000));   // boot grace period
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(5000));
     uint32_t now = millis();
+    if ((int32_t)(wdtGraceUntil - now) > 0) continue;
     if (now - mainTick > MAIN_STALL_MS) {
       Serial.println("[wdt] main loop stalled -> reboot");
       Serial.flush();
@@ -2050,18 +2443,7 @@ static void handleSettingsTap(int tx, int ty) {
   if (tx > tileX(i) + TILE_W || ty > tileY(i) + TILE_H) return;   // tapped a gap
   switch (i) {
     case MI_SYNC:
-      if (!cloudConfigured()) {
-        // No sheet on this device: explain how to add one (Wi-Fi setup page).
-        showBusy("Add a sheet: Settings > Wi-Fi > Reset");
-        delay(2200);
-        contentDirty = true;
-        break;
-      }
-      showBusy("Syncing from sheet…");
-      lastPullN = cloudPull();
-      if (lastPullN >= 0) { lastSyncAt = nowEpoch(); buzzerAccept(); }
-      else buzzerReject();
-      contentDirty = true;
+      if (cloudAvailable()) openAccount();   // sign in / sync / sign out
       break;
     case MI_UNIT:
       setUnitLb = !setUnitLb;
@@ -2087,7 +2469,6 @@ static void handleSettingsTap(int tx, int ty) {
         float g;
         if (setGoalKg <= 0) {   // first tap: start from the latest weight, rounded
           g = roundf(toDisp(historyCount() ? historyLast().kg : 100.0f));
-          setGoalStartKg = historyCount() ? historyLast().kg : 0;
         } else {
           g = roundf(toDisp(setGoalKg)) + (plus ? 1 : -1);
         }
@@ -2095,7 +2476,6 @@ static void handleSettingsTap(int tx, int ty) {
         setGoalKg = fromDisp(g);
       } else {                                                    // label → goal off
         setGoalKg = 0;
-        setGoalStartKg = 0;
       }
       settingsSave();
       drawSettingTile(MI_GOAL);
@@ -2125,14 +2505,12 @@ static void handleSettingsTap(int tx, int ty) {
     case MI_CALIBRATE:
       runCalibrate(); break;
     case MI_SCALE:
-      // Forget the learned scale; the next scale that locks a reading is learned.
-      Scale::setLearnedMac("");
-      scaleMacSave("");
-      Serial.println("[okok] scale forgotten — will learn the next one");
-      drawSettingTile(MI_SCALE);
+      if (Scale::canPair()) openPair();      // scan + pick (S200 builds: fixed scale)
       break;
     case MI_OTA:
-      wantOta = true; break;
+      if (otaAutoEnabled()) runUpdate(true); // check online now, install if newer
+      else wantOta = true;                   // web upload from a computer
+      break;
     case MI_WIFI: {
       showBusy("Wi-Fi reset…");
       WiFiManager wm; wm.resetSettings();
@@ -2172,6 +2550,12 @@ static void handleTap(int tx, int ty) {
       return;
     case MODE_MEASURE:
       return;
+    case MODE_PAIR:
+      handlePairTap(tx, ty);
+      return;
+    case MODE_ACCOUNT:
+      handleAccountTap(tx, ty);
+      return;
   }
 
   // Rail → switch screen.
@@ -2198,9 +2582,9 @@ static void handleTap(int tx, int ty) {
 }
 
 // Hold a finger on the screen at power-on to wipe WiFi + reopen the portal.
-// One pressure reading isn't enough: a touch read that returns zeros looks like
-// full pressure, and that wiped the saved network on ordinary restarts. So it
-// takes a valid (calibrated, consistent) touch held for ~2 s, with a prompt.
+// One pressure reading isn't enough: something resting on the panel (a bezel,
+// the case) reads as a press, and that wiped the saved network on ordinary
+// restarts. So it takes a valid on-screen touch held for ~2 s, with a prompt.
 static bool bootHoldForPortal() {
   uint16_t x, y;
   delay(60);
@@ -2217,7 +2601,9 @@ static bool bootHoldForPortal() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\n=== Smart Mirror  fw=" FW_VERSION "  board=" BOARD_NAME " ===");
+  Serial.printf("\n=== Smart Mirror  fw=%s (build %d)  board=%s  updates=%s ===\n", FW_VERSION,
+                FW_BUILD, BOARD_NAME, otaAutoEnabled() ? "online" : "manual");
+  otaBootBegin();               // notes a rolled-back update so it isn't retried
 
   ledBegin();
   buzzerBegin(PIN_SPEAKER, PIN_SPEAKER_EN);
@@ -2240,20 +2626,31 @@ void setup() {
   }
 
   // Show the Wi-Fi setup screen (QR + steps) when the captive portal opens.
-  setWifiPortalCallback([](const char *ap, const char *ip) { drawSetup(ap); });
+  setWifiPortalCallback([](const char *ap, bool accountOnly) { drawSetup(ap, accountOnly); });
 
-  cloudBegin();     // per-device sheet config (prefills the WiFi setup page)
+  timeZoneBegin();  // local days for the history's trend, even before NTP
+  historyBegin();   // mounts the filesystem (a setup-page sign-in may clear the log)
+  cloudBegin();     // the saved account (its email prefills the setup page)
   timeSyncAtBoot(forcePortal);
-  historyBegin();
   settingsLoad();   // units / sound / goal / learned scale from NVS
 
-  // First boot of a unit with a sheet configured (e.g. replacing an older mirror):
-  // take the weight history over from the sheet before the first weigh-in.
-  if (historyCount() == 0 && cloudConfigured()) {
-    Serial.println("[cloud] empty history -> pulling it from the sheet");
+  // Just signed in on the setup page: show the outcome, then upload readings
+  // made offline and take over the account's history. A unit that is signed in
+  // but has no log (e.g. replacing an older mirror) takes the history too.
+  bool acctOk = false;
+  const char *acctMsg = accountSetupMessage(&acctOk);
+  if (acctMsg[0]) {
+    fullMessage(acctMsg, acctOk ? C_MINT : C_AMBER);
+    delay(2500);
+  }
+  if (cloudConfigured() && (acctOk || historyCount() == 0)) {
+    Serial.println("[cloud] taking over the account's history");
+    if (cloudHasPending()) cloudFlush();
     lastPullN = cloudPull();
     if (lastPullN >= 0) lastSyncAt = nowEpoch();
   }
+  // Settings changed on another of the user's devices (or theirs, after sign-in).
+  if (cloudConfigured()) settingsSync(acctOk);
 
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
   tof.setTimeout(500);
@@ -2284,7 +2681,7 @@ void setup() {
   screen = SCR_HOME;
   render();          // draw Home first: the boot melody blocks for ~1.7 s
   dirty = false;
-  buzzerBoot();
+  if (!quietHours()) buzzerBoot();   // e.g. no chime after a night-time update
 
   mainTick = millis();
   xTaskCreatePinnedToCore(watchdogTask, "wdt", 3072, nullptr, 1, nullptr, 1);
@@ -2298,16 +2695,20 @@ static long lastDay = -2;
 
 void loop() {
   mainTick = millis();   // feed the watchdog
+  // Running normally for 30 s: keep this firmware (an update that crashes or
+  // restarts before this point is rolled back by the bootloader).
+  if (millis() > 30000) otaConfirmHealthy();
 
-  // Serial dev hooks: o=OTA, p=pull, d=diag, c=calibrate touch, t=raw touch,
-  // f=fill demo history (real log backed up), r=restore the real log.
+  // Serial dev hooks: o=web OTA, u=online update now, p=pull, d=diag, c=calibrate
+  // touch, t=raw touch, x=distance sensor, h=history, f=fill demo history (real
+  // log backed up), r=restore the real log.
   if (Serial.available()) {
     int c = Serial.read();
     if (c == 'o' || c == 'O') wantOta = true;
+    else if (c == 'u' && otaAutoEnabled()) { displayWake(); runUpdate(true); }
     else if (c == 'f' && historySeedDemo(nowEpoch()) > 0) {
       if (setGoalKg <= 0) {               // give the ring something to show
         setGoalKg = roundf(historyLast().kg) - 5;
-        setGoalStartKg = historyAt(0).kg;
         settingsSave();
       }
       displayWake();
@@ -2345,6 +2746,17 @@ void loop() {
       }
     }
     else if (c == 'c' || c == 'C') { displayWake(); runCalibrate(); }
+    else if (c == 'x') {                  // distance sensor readout for 8 s
+      for (int i = 0; i < 40 && tofOk; i++) {
+        int mm = tof.readRangeContinuousMillimeters();
+        Serial.printf("[tof] %d mm%s present=%d display=%s quiet=%d\n", mm,
+                      tof.timeoutOccurred() ? " TIMEOUT" : "", present,
+                      displayOn ? "on" : "off", quietHours());
+        mainTick = millis();
+        delay(200);
+      }
+      if (!tofOk) Serial.println("[tof] not found at boot");
+    }
   }
   if (wantOta) { wantOta = false; startOtaMode(); }
   if (otaMode) {
@@ -2376,18 +2788,12 @@ void loop() {
   while (xQueueReceive(weightQ, &we, 0) == pdTRUE) {
     lastWeighMs = millis();            // note scale activity → hold off WiFi sync
     displayWake();
-    // One weigh-in, one reading: a second "stable" within a minute of the last
-    // stored reading is the same stand (the scale re-locking, a step off and on).
+    // Every stand is shown. The same weight again within a minute of the stored
+    // reading (stepping straight back on) is shown but not saved a second time.
     uint32_t sinceLast = (timeIsSet() && historyCount()) ? nowEpoch() - historyLast().ts : 9999;
-    if (we.stable && sinceLast < 60) {
-      Serial.printf("[ui] ignored %.2f kg: %lus after the last reading\n", we.kg,
-                    (unsigned long)sinceLast);
-      if (mode == MODE_MEASURE) {      // leave the live screen; a Result stays up
-        liveState = 0;
-        mode = MODE_RAIL;
-        screen = SCR_HOME;
-        dirty = true;
-      }
+    bool repeat = we.stable && sinceLast < 60 && fabsf(we.kg - historyLast().kg) < 0.15f;
+    if (repeat) {
+      recordStable(we.kg, false);
     } else if (we.stable) {
       if (validateReading(we.kg)) {
         recordStable(we.kg);                     // accepted → store + sync + Result
@@ -2436,8 +2842,10 @@ void loop() {
     if (tofOk) {
       int mm = tof.readRangeContinuousMillimeters();
       if (!tof.timeoutOccurred() && mm > 0) {
+        bool was = present;
         if (!present && mm < PRESENCE_MM) present = true;
         else if (present && mm > PRESENCE_CLEAR_MM) present = false;
+        if (present != was) Serial.printf("[tof] %s (%d mm)\n", present ? "present" : "gone", mm);
         if (present && !quietHours()) displayWake();  // keep awake while present
       }
     }
@@ -2479,8 +2887,24 @@ void loop() {
     dirty = true;
   }
 
+  // Pairing: refresh the list of scales heard; close after a while untouched.
+  if (mode == MODE_PAIR) {
+    if (millis() - lastPairPoll > 500) {
+      lastPairPoll = millis();
+      pairN = Scale::nearby(pairList, PR_ROWS, 15000);
+      if (!dirty) for (int i = 0; i < PR_ROWS; i++) drawPairRow(i);
+    }
+    if (millis() - lastWakeMs > PAIR_MS) closePair();
+  }
+  if (mode == MODE_ACCOUNT && millis() - lastWakeMs > 120000) {
+    mode = MODE_RAIL;
+    screen = SCR_HOME;
+    dirty = true;
+  }
+
   // Sleep the display after inactivity — never mid weigh-in / result / prompt.
-  bool holdAwake = mode == MODE_MEASURE || mode == MODE_RESULT || mode == MODE_CONFIRM;
+  bool holdAwake = mode == MODE_MEASURE || mode == MODE_RESULT || mode == MODE_CONFIRM ||
+                   mode == MODE_PAIR || mode == MODE_ACCOUNT;
   if (displayOn && !holdAwake && millis() - lastWakeMs > DISPLAY_TIMEOUT_MS)
     displaySleep();
 
@@ -2494,19 +2918,32 @@ void loop() {
   bool recentWeigh = (lastWeighMs != 0 && millis() - lastWeighMs < 20000);
   bool busy = (strcmp(statusStr, "Reading") == 0) || present || recentWeigh ||
               mode != MODE_RAIL;
-  if (cloudHasPending() && !busy && (millis() - lastSyncMs > syncBackoffMs)) {
+  bool settingsDue = setDirty && cloudConfigured();
+  if ((cloudHasPending() || settingsDue) && !busy && (millis() - lastSyncMs > syncBackoffMs)) {
     setStatus("Syncing");
     syncing = true;
     if (displayOn && screen == SCR_HOME) drawHomeWifi();
-    int sent = cloudFlush();    // blocking: WiFi up → POST → WiFi off
+    if (cloudHasPending()) cloudFlush();   // blocking: WiFi up → upload → WiFi off
+    // Queue empty: also push a settings change made here / take one made elsewhere.
+    bool ok = !cloudHasPending() && settingsSync(false);
     lastSyncMs = millis();
-    if (sent > 0) { syncBackoffMs = 20000; lastSyncAt = nowEpoch(); }   // success → fast again
+    if (ok) { syncBackoffMs = 20000; lastSyncAt = nowEpoch(); }   // success → fast again
     else { syncBackoffMs *= 3; if (syncBackoffMs > 900000) syncBackoffMs = 900000; }
     setStatus("Ready");
     syncing = false;
     if (displayOn && mode == MODE_RAIL && screen == SCR_HOME) drawHomeWifi();
     if (displayOn && mode == MODE_RAIL && screen == SCR_SETTINGS) drawSettingTile(MI_SYNC);
   }
+
+  // Online update: first after boot, then every 12 h (1 h after a failure),
+  // only when nobody is around: the display dark for 10 min. A check blocks the
+  // loop (WiFi + HTTPS), so the display can't wake meanwhile; right after
+  // someone walked away they may well come straight back.
+  bool otaDue = otaIntervalMs ? millis() - lastOtaCheckMs > otaIntervalMs
+                              : millis() > OTA_FIRST_CHECK_MS;
+  if (otaAutoEnabled() && otaDue && !busy && !displayOn && wifiSavedSsid()[0] &&
+      millis() - sleptAtMs > OTA_IDLE_MS)
+    runUpdate(false);
 
   ledUpdate();
 

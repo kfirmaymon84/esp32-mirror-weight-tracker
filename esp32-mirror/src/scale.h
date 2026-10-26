@@ -35,6 +35,11 @@ inline uint32_t heartbeat() { return MiScale::heartbeat(); }
 // learn or forget: report that MAC and ignore resets.
 inline void setLearnedMac(const char *) {}
 inline const char *learnedMac() { return SCALE_MAC; }
+// The S200 is fixed by its MAC + token in secrets.h: no pairing screen.
+struct Nearby { char mac[18]; int rssi; float kg; uint32_t seenMs; };
+inline int nearby(Nearby *, int, uint32_t) { return 0; }
+inline void setPairing(bool) {}
+constexpr bool canPair() { return false; }
 
 }  // namespace Scale
 

@@ -33,3 +33,7 @@ enclosure/out/assembly_preview.step
 enclosure/out/_*.stl
 enclosure/__pycache__/
 enclosure/out/E32R40T_board_*.step
+
+# OTA release signing key (private!) and generated release files
+esp32-mirror/ota/*.pem
+esp32-mirror/ota/release/

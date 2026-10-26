@@ -16,6 +16,7 @@ void historyReload();                // re-read the log file into RAM (after a c
 void historyAdd(uint32_t ts, float kg);
 
 int historyCount();
+void historyClear();                 // forget every reading (file + RAM), e.g. sign-out
 // Once the clock is set: give the latest reading, if it was taken unclocked
 // earlier in this boot, its real time (now minus the time since it was taken).
 void historyDateUnclocked(uint32_t now);
@@ -53,7 +54,7 @@ float historyAvgPrevDays(int days, uint32_t now);
 
 // ── Demo data (dev: serial 'f' / 'r') ───────────────────────────────────────
 // Back the real log up to /history.real.csv, then write ~4 months of made-up
-// daily readings ending at the real ones (local only, never sent to the sheet).
+// daily readings ending at the real ones (local only, never uploaded).
 // Returns the number of demo readings added (0 if the clock isn't set).
 int historySeedDemo(uint32_t now);
 bool historyRestoreReal();           // put the backed-up real log back

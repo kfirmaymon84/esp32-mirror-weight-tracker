@@ -1,8 +1,10 @@
 #pragma once
 #include <stdint.h>
 
-// Bump this to visibly confirm a firmware update (printed at boot).
-#define FW_VERSION "4"
+// Firmware version shown to people, and the build number the online updater
+// compares (a device installs only a higher FW_BUILD). Bump both per release.
+#define FW_VERSION "5"
+#define FW_BUILD   5
 
 // Hardware profile (pins, screen size, calibration) for the selected board.
 #include "board.h"
@@ -14,7 +16,8 @@
 
 // ── Scale (OKOK / Chipsea BLE broadcast) ────────────────────────────────────
 // Pins live in board.h. The scale needs no keys: the firmware listens for its
-// advertisement and learns the first scale's MAC (Settings → Scale forgets it).
+// advertisement and learns the first scale's MAC, or Settings → Scale scans
+// for nearby scales and pairs the one the user picks.
 
 // ── Presence detection (VL53L0X) ────────────────────────────────────────────
 #define PRESENCE_MM      900   // closer than this = someone is here

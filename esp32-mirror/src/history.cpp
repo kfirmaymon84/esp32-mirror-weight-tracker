@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <math.h>
+#include <sys/stat.h>
 
 #include "config.h"
 
@@ -56,7 +57,9 @@ static void computeTrend() {
 void historyReload() {
   count = 0;
   head = 0;
-  File f = LittleFS.open(PATH, "r");
+  // A new device has no log yet: check silently (open() would log an error).
+  struct stat st;
+  File f = stat("/littlefs/history.csv", &st) == 0 ? LittleFS.open(PATH, "r") : File();
   if (f) {
     while (f.available()) {
       String line = f.readStringUntil('\n');
@@ -70,7 +73,7 @@ void historyReload() {
     }
     f.close();
   }
-  // Sort by timestamp ascending — sheet rows (after a cloud pull) may be
+  // Sort by timestamp ascending — readings (after a cloud pull) may be
   // unordered; the graph and one-per-day logic expect chronological order.
   // On a fresh reload head==0, so entries live in ring[0..count-1].
   for (int i = 1; i < count; i++) {
@@ -127,6 +130,13 @@ void historyDateUnclocked(uint32_t now) {
     Serial.printf("[hist] dated the unclocked reading %.2f kg @ %u\n", ring[idx].kg,
                   (unsigned)ring[idx].ts);
   }
+  s_unclockedMs = 0;
+}
+
+void historyClear() {
+  LittleFS.remove(PATH);
+  count = 0;
+  head = 0;
   s_unclockedMs = 0;
 }
 
