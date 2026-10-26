@@ -3,8 +3,8 @@
 
 // Firmware version shown to people, and the build number the online updater
 // compares (a device installs only a higher FW_BUILD). Bump both per release.
-#define FW_VERSION "6"
-#define FW_BUILD   6
+#define FW_VERSION "7"
+#define FW_BUILD   7
 
 // Hardware profile (pins, screen size, calibration) for the selected board.
 #include "board.h"

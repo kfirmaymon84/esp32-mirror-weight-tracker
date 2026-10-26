@@ -140,6 +140,11 @@ static void applyAccount(AccountFields &a) {
   accountMsg[0] = 0;
   accountOk = false;
   if (!email.length()) return;               // offline use: nothing to do
+  // Already signed in as this (prefilled) email, password left empty: e.g. a
+  // Wi-Fi change. The account stays as it is; nothing to report.
+  if (!pw.length() && !a.reset.getValue()[0] && cloudConfigured() &&
+      email == String(cloudEmail()))
+    return;
   if (a.reset.getValue()[0]) {
     accountOk = cloudSendPasswordReset(email.c_str());
     snprintf(accountMsg, sizeof(accountMsg), accountOk ? "Reset link sent to %s"

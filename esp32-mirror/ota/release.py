@@ -18,8 +18,10 @@ Two channels:
   py -3 ota/release.py build [--base-url http://192.168.137.1:8000]
                                   build + sign into ota/release/ only (local test server)
 
-Bump FW_BUILD (and FW_VERSION) in src/config.h before every beta: devices
-only install a build number higher than their own.
+Before every beta: bump FW_BUILD (and FW_VERSION) in src/config.h (devices
+only install a build number higher than their own) and turn "Unreleased" in
+CHANGELOG.md into "## Firmware <version> ...": that section is the release
+notes, and beta refuses to publish without it.
 """
 import base64
 import hashlib
@@ -126,13 +128,25 @@ def files():
     return [os.path.join(OUT, f"{b}.{e}") for b in BOARDS for e in ("bin", "json")]
 
 
+def changelog(ver):
+    """The CHANGELOG.md section of this version (the release notes); exits if missing."""
+    text = open(os.path.join(ROOT, "CHANGELOG.md"), encoding="utf-8").read()
+    m = re.search(r"^## Firmware " + re.escape(ver) + r"\b[^\n]*\n(.*?)(?=^## |\Z)", text,
+                  re.S | re.M)
+    if not m or not m.group(1).strip():
+        sys.exit(f'CHANGELOG.md has no "## Firmware {ver} ..." section: describe the changes '
+                 f'(rename "Unreleased") before releasing')
+    return m.group(1).strip()
+
+
 def beta():
     """Build + sign every board and replace the files of the "beta" pre-release."""
     num, ver = fw_build()
+    changes = changelog(ver)                   # before building: fail fast
     build("", channel="beta")
     title = f"Beta: firmware {ver} (build {num})"
-    notes = (f"Beta firmware {ver} (build {num}). Installed by devices with "
-             f"the beta channel (set over USB). Promoted to stable when it has proven itself.")
+    notes = (f"Beta firmware {ver} (build {num}), for devices on the beta channel "
+             f"(set over USB). Promoted to stable when it has proven itself.\n\n{changes}")
     if gh("release", "view", "beta", check=False).returncode != 0:
         gh("release", "create", "beta", *files(), "--prerelease", "--title", title,
            "--notes", notes)
@@ -169,7 +183,8 @@ def promote():
         sys.exit(f"beta boards have different builds {sorted(builds)} - not promoting")
     num, ver = builds.pop(), man["version"]
     gh("release", "create", f"v{num}", *out, "--latest", "--title", f"Firmware {ver}",
-       "--notes", f"Firmware {ver} (build {num}). Installed automatically by the devices.")
+       "--notes", f"Firmware {ver} (build {num}). Installed automatically by the devices."
+                  f"\n\n{changelog(ver)}")
     print(f"stable channel: build {num} ({ver})")
 
 
