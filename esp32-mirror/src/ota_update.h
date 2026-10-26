@@ -32,6 +32,18 @@ bool otaAutoEnabled();                 // false on builds without OTA_BOARD
 void otaBootBegin();                   // first thing in setup(): rollback bookkeeping
 void otaConfirmHealthy();              // mark the running image good (idempotent)
 
+// Channel: stable (default) = <base>/latest/download, the releases everyone
+// gets; beta = also the "beta" pre-release, which ota/release.py publishes first
+// and later promotes to stable. A beta device takes whichever build is newer.
+bool otaBeta();
+void otaSetBeta(bool on);
+void otaForgetBad();                   // retry a build that was rolled back (dev, USB)
+
+// May an automatic check run now? Overnight (02:00-05:00 local), or any time
+// once 3 days have passed without a successful check (a device that's off at
+// night). Without a clock: yes (the caller's idle rules still apply).
+bool otaWindowOpen();
+
 // Both connect WiFi themselves (saved network) and leave it on; call wifiOff().
 OtaResult otaCheck(OtaRelease &rel);
 // Download + verify + switch the boot slot. On success the caller restarts.

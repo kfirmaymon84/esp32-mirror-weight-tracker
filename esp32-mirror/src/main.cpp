@@ -3,8 +3,7 @@
 //
 // Hardware: per-board profile in board.h (currently the 4" E32R40T: ST7796S
 // 480x320 + XPT2046 touch, speaker amp, RGB LED, ToF on I2C; USB powered).
-// Scale: selected at build time via scale.h — OKOK broadcast (default, no keys) or
-// the Xiaomi S200 (-D SCALE_S200, personal builds using the keys in secrets.h).
+// Scale: OKOK / Chipsea broadcast (scale.h): no keys, learned or paired on the device.
 //
 // UI "Halo" (landscape 480x320, black = mirror, one mint accent, amber for
 // attention, smooth Outfit/Inter fonts from halo_fonts.h):
@@ -107,22 +106,19 @@ static const int RAIL_BTN_Y0 = 62, RAIL_BTN_PITCH = 68;
 // ── UI state ────────────────────────────────────────────────────────────────
 enum Screen { SCR_HOME = 0, SCR_TRENDS = 1, SCR_SETTINGS = 2 };
 enum Mode { MODE_RAIL, MODE_MEASURE, MODE_RESULT, MODE_CONFIRM, MODE_NIGHT, MODE_PAIR,
-            MODE_ACCOUNT };
+            MODE_ACCOUNT, MODE_FIRMWARE };
 static int screen = SCR_HOME;           // rail screen; Home is the resting screen
 static int mode = MODE_RAIL;            // what fills the display
 static int lastPullN = -2;              // -2 never, -1 failed, >=0 readings pulled
 static time_t lastSyncAt = 0;           // last successful account sync (epoch)
+static int lastMinute = -1;             // clock redraw on minute change (-1 = now)
 static bool syncing = false;            // cloud flush in progress (Wi-Fi icon cyan)
 
 // ── Settings (persisted in NVS) ─────────────────────────────────────────────
 static bool  setUnitLb = false;         // display kg (false) or lb (true)
 static int   setSound  = SOUND_MID;     // speaker volume: Off / Low / Mid / High
 static float setGoalKg = 0;             // goal weight in kg (0 = none)
-#if defined(SCALE_S200)
-static const float HEIGHT_DEFAULT_CM = USER_HEIGHT_CM;   // personal build: owner's height
-#else
-static const float HEIGHT_DEFAULT_CM = 0;                // product: unset until entered
-#endif
+static const float HEIGHT_DEFAULT_CM = 0;  // unset until entered (or synced from the account)
 static float setHeightCm = 0;           // body height for BMI (0 = not set)
 static String savedScaleMac;            // scale MAC as stored in NVS
 // Units / sound / goal / height also live in the account (users/<uid>/settings/
@@ -130,9 +126,10 @@ static String savedScaleMac;            // scale MAC as stored in NVS
 static uint32_t setUpdated = 0;         // epoch of the last change on this device
 static bool setDirty = false;           // changed since the last upload
 
-// Settings tiles (2 columns x 4 rows), each a touch target.
+// Settings tiles (2 columns x 5 rows), each a touch target.
 enum MenuItem { MI_SYNC, MI_UNIT, MI_GOAL, MI_HEIGHT, MI_SOUND, MI_CALIBRATE, MI_SCALE,
-                MI_OTA, MI_WIFI, MI_COUNT };
+                MI_OTA, MI_WIFI, MI_TZ, MI_COUNT };
+static uint32_t wifiResetArmedUntil = 0;  // Wi-Fi tile tapped once: tap again to reset
 static const int TILE_ROWS = (MI_COUNT + 1) / 2;
 static const int TILE_Y0 = 50, TILE_W = 185, TILE_H = 46, TILE_GAP = 6;
 // Text rows inside a tile: small label (top), value (middle line), big-number baseline.
@@ -158,7 +155,7 @@ static bool wantOta = false;                 // request to enter OTA mode (from 
 static uint32_t otaUntil = 0;
 static const uint32_t OTA_WINDOW_MS = 300000;  // 5 min listen window
 
-// Online updates (product builds): checked soon after boot, then every 12 h
+// Online updates: checked overnight (see otaWindowOpen), at most every 12 h
 // (1 h after a failed check), only after the display has been dark 10 min.
 static char otaNote[20] = "";                // Settings tile: "Up to date", ...
 static uint32_t lastOtaCheckMs = 0;
@@ -1431,17 +1428,19 @@ static void drawSettingTile(int i) {
       tileText(i, tileFrame(i, IC_SCALE),
                mac[0] ? "Scale \xC2\xB7 paired" : "Scale \xC2\xB7 any", v, C_TEXT);
     } break;
-    case MI_OTA:
-      if (otaAutoEnabled())       // online updates: tap = check (and install) now
-        tileText(i, tileFrame(i, IC_DOWNLOAD), "Firmware " FW_VERSION " \xC2\xB7 auto",
-                 otaNote[0] ? otaNote : "Check now", C_TEXT);
-      else                        // web upload from a computer on the same Wi-Fi
-        tileText(i, tileFrame(i, IC_DOWNLOAD), "Firmware " FW_VERSION, "Update", C_TEXT);
+    case MI_OTA:                  // tap = the Firmware screen (check now, beta)
+      tileText(i, tileFrame(i, IC_DOWNLOAD),
+               otaBeta() ? "Firmware " FW_VERSION " \xC2\xB7 beta" : "Firmware " FW_VERSION,
+               otaNote[0] ? otaNote : "Auto-updates", C_TEXT);
       break;
     case MI_WIFI:
       if (wifiSavedSsid()[0]) snprintf(l, sizeof(l), "Wi-Fi \xC2\xB7 %.10s", wifiSavedSsid());
       else snprintf(l, sizeof(l), "Wi-Fi");
-      tileText(i, tileFrame(i, IC_WIFI), l, "Reset", C_AMBER);
+      tileText(i, tileFrame(i, IC_WIFI), l,
+               millis() < wifiResetArmedUntil ? "Tap again" : "Reset", C_AMBER);
+      break;
+    case MI_TZ:
+      tileText(i, tileFrame(i, -1), "Time zone", timeZoneCity(), C_TEXT);
       break;
   }
 }
@@ -1729,20 +1728,27 @@ static void drawNight() {
 }
 
 // ── Wi-Fi setup (captive portal open) ───────────────────────────────────────
-// accountOnly: opened from Settings → Account to sign in (Wi-Fi already set).
-static void drawSetup(const char *ap, bool accountOnly) {
+// First setup, or opened from Settings to sign in / change the time zone.
+static void drawSetup(const char *ap, PortalKind kind) {
   tft.fillScreen(C_INK);
   const int x = 28, colW = 288 - 24 - x;
   useFont(F_I11B);
-  label(accountOnly ? "SETTINGS \xC2\xB7 ACCOUNT" : "SETUP", x, 52, 0, C_MINT, C_INK);
+  label(kind == PORTAL_ACCOUNT ? "SETTINGS \xC2\xB7 ACCOUNT"
+        : kind == PORTAL_TIMEZONE ? "SETTINGS \xC2\xB7 TIME ZONE" : "SETUP",
+        x, 52, 0, C_MINT, C_INK);
   useFont(F_I22B);
-  text(accountOnly ? "Sign in" : "Connect to Wi-Fi", x, 78, TL_DATUM, C_TEXT, C_INK);
+  text(kind == PORTAL_ACCOUNT ? "Sign in" : kind == PORTAL_TIMEZONE ? "Time zone"
+                                                                    : "Connect to Wi-Fi",
+       x, 78, TL_DATUM, C_TEXT, C_INK);
   static const char *SETUP[3] = {"Scan the code with your phone camera", "Pick your home Wi-Fi",
                                  cloudAvailable() ? "Sign in or create your account (optional)"
                                                   : "Save: the mirror carries on by itself"};
   static const char *SIGNIN[3] = {"Scan the code with your phone camera", "Tap Setup",
                                   "Sign in or create your account, then Save"};
-  const char *const *STEPS = accountOnly ? SIGNIN : SETUP;
+  static const char *ZONE[3] = {"Scan the code with your phone camera", "Tap Setup",
+                                "Your phone's zone is picked: check it, then Save"};
+  const char *const *STEPS = kind == PORTAL_ACCOUNT ? SIGNIN
+                             : kind == PORTAL_TIMEZONE ? ZONE : SETUP;
   int y = 120;
   for (int i = 0; i < 3; i++) {
     tft.fillSmoothCircle(x + 10, y + 10, 10, C_CHIP, C_INK);
@@ -1768,8 +1774,12 @@ static void drawSetup(const char *ap, bool accountOnly) {
   text(s, x + 31, y + 16, ML_DATUM, C_TEXT2, C_INK);
   useFont(F_I11B);
   text(ap, x + 31 + w1, y + 16, ML_DATUM, C_TEXT, C_INK);
+  // Phones open the page by themselves (captive portal); if one doesn't:
+  useFont(F_I11);
+  text("No page? Open 192.168.4.1", x, y + 40, TL_DATUM, C_TEXT3, C_INK);
 
-  // QR code: joins the setup network (open AP).
+  // QR code: joins the setup network (open AP). A QR code can't also open a
+  // page; joining makes the phone pop the setup page up (captive portal).
   const int qx = 288, qy = 64, qs = 168;
   tft.fillSmoothRoundRect(qx, qy, qs, qs, 16, C_TEXT, C_INK);
   char payload[64];
@@ -1785,6 +1795,8 @@ static void drawSetup(const char *ap, bool accountOnly) {
   }
   useFont(F_I11);
   text("Point your camera here", qx + qs / 2, qy + qs + 10, TC_DATUM, C_TEXT2, C_INK);
+  if (kind != PORTAL_SETUP)       // opened from Settings: a tap backs out
+    text("Tap the screen to cancel", qx + qs / 2, qy + qs + 30, TC_DATUM, C_AMBER, C_INK);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -2029,6 +2041,30 @@ static void syncNow(bool justSignedIn = false) {
   mainTick = millis();
 }
 
+// A phone page opened from Settings: feeds the watchdog while it waits, and a
+// tap on the screen cancels it (the finger that opened it must lift first).
+static bool portalCancelArmed = false;
+static bool portalTick() {
+  mainTick = millis();
+  uint16_t x, y;
+  bool down = tft.getTouch(&x, &y);
+  if (!down) portalCancelArmed = true;
+  else if (portalCancelArmed) {
+    buzzerClick();
+    while (tft.getTouch(&x, &y)) { mainTick = millis(); delay(10); }   // not a tap on Settings
+    return true;
+  }
+  return false;
+}
+static bool openPhonePage(PortalKind kind, bool *tzChanged) {
+  portalCancelArmed = false;
+  wdtGraceUntil = millis() + 200000;               // the page waits up to 3 min
+  bool saved = phonePortal(kind, portalTick, tzChanged);
+  wdtGraceUntil = 0;
+  mainTick = millis();
+  return saved;
+}
+
 static void handleAccountTap(int tx, int ty) {
   if (ty < AB_Y - 6) return;
   if (tx < AB_DONE_X + AB_DONE_W + 6) {                       // Done
@@ -2047,8 +2083,9 @@ static void handleAccountTap(int tx, int ty) {
                                                 : "Couldn't reach your account. Try again later.",
                lastPullN);
     } else {
-      wdtGraceUntil = millis() + 200000;                      // the page waits up to 3 min
-      bool saved = accountPortal([]() { mainTick = millis(); });
+      bool tzChanged = false;
+      bool saved = openPhonePage(PORTAL_ACCOUNT, &tzChanged);
+      if (tzChanged) historyReload();                         // days follow the new zone
       bool ok = false;
       const char *m = accountSetupMessage(&ok);
       if (saved && ok && cloudConfigured()) syncNow(true);    // offline readings up, history down
@@ -2084,6 +2121,8 @@ static void handleAccountTap(int tx, int ty) {
   }
 }
 
+static void drawFirmware();     // Settings → Firmware (below, next to the updater)
+
 static void render() {          // whole screen for the current mode
   tft.fillScreen(C_INK);
   switch (mode) {
@@ -2094,6 +2133,7 @@ static void render() {          // whole screen for the current mode
     case MODE_NIGHT: drawNight(); break;
     case MODE_PAIR: drawPair(); break;
     case MODE_ACCOUNT: drawAccount(); break;
+    case MODE_FIRMWARE: drawFirmware(); break;
   }
 }
 
@@ -2389,6 +2429,51 @@ static void runUpdate(bool interactive) {
   }
 }
 
+// ── Firmware (Settings → Firmware) ──────────────────────────────────────────
+// Version, how updates arrive and Check now (installs at once, any time of day).
+// Same layout and buttons as the Account screen. The beta channel has no button:
+// it's switched over USB only (serial 'b'), so testers stay on stable.
+static void drawFirmware() {
+  tft.fillRect(0, 0, SCR_W, SCR_H, C_INK);
+  useFont(F_I11B);
+  label("SETTINGS \xC2\xB7 FIRMWARE", AC_X, 22, 0, C_MINT, C_INK);
+  useFont(F_I22B);
+  text("Firmware " FW_VERSION, AC_X, 40, TL_DATUM, C_TEXT, C_INK);
+  useFont(F_I13);
+  int y = 92;
+  y += 19 * textWrap("Updates install by themselves overnight (02:00-05:00). "
+                     "Check now to update right away.",
+                     AC_X, y, SCR_W - 2 * AC_X, 19, C_TEXT2, C_INK, 2) + 10;
+  if (otaBeta())                                   // set over USB on the owner's units
+    textWrap("Beta channel: this device gets new versions first.", AC_X, y,
+             SCR_W - 2 * AC_X, 19, C_AMBER, C_INK, 2);
+  if (acNote[0])
+    textWrap(acNote, AC_X, 210, SCR_W - 2 * AC_X, 19, acNoteOk ? C_MINT : C_AMBER, C_INK, 2);
+  acButton(AB_DONE_X, AB_DONE_W, "Done", C_TEXT);
+  acButton(AB_MAIN_X, AB_MAIN_W, "Check now", C_TEXT);
+}
+
+static void openFirmware() {
+  acNote[0] = 0;
+  mode = MODE_FIRMWARE;
+  dirty = true;
+}
+
+static void handleFirmwareTap(int tx, int ty) {
+  if (ty < AB_Y - 6) return;
+  if (tx < AB_DONE_X + AB_DONE_W + 6) {                       // Done
+    mode = MODE_RAIL;
+    screen = SCR_SETTINGS;
+    dirty = true;
+  } else if (tx < AB_MAIN_X + AB_MAIN_W + 6) {                // Check now
+    runUpdate(true);                                          // restarts if it installed
+    snprintf(acNote, sizeof(acNote), "%s", strcmp(otaNote, "Up to date") == 0
+             ? "You have the latest version." : otaNote);
+    acNoteOk = strcmp(otaNote, "Up to date") == 0;
+    dirty = true;
+  }
+}
+
 // Independent watchdog: reboots if the main loop or scale task stops ticking.
 static void watchdogTask(void *) {
   vTaskDelay(pdMS_TO_TICKS(20000));   // boot grace period
@@ -2441,6 +2526,10 @@ static void handleSettingsTap(int tx, int ty) {
   int i = row * 2 + col;
   if (i >= MI_COUNT) return;                                      // empty slot
   if (tx > tileX(i) + TILE_W || ty > tileY(i) + TILE_H) return;   // tapped a gap
+  if (i != MI_WIFI && wifiResetArmedUntil) {                      // any other tap disarms it
+    wifiResetArmedUntil = 0;
+    drawSettingTile(MI_WIFI);
+  }
   switch (i) {
     case MI_SYNC:
       if (cloudAvailable()) openAccount();   // sign in / sync / sign out
@@ -2505,17 +2594,33 @@ static void handleSettingsTap(int tx, int ty) {
     case MI_CALIBRATE:
       runCalibrate(); break;
     case MI_SCALE:
-      if (Scale::canPair()) openPair();      // scan + pick (S200 builds: fixed scale)
+      openPair();                            // scan for scales + pick one
       break;
     case MI_OTA:
-      if (otaAutoEnabled()) runUpdate(true); // check online now, install if newer
-      else wantOta = true;                   // web upload from a computer
+      openFirmware();                        // Check now (installs at once) / Beta
       break;
     case MI_WIFI: {
+      // Forgetting the network is drastic: the first tap only arms it (4 s).
+      if (millis() >= wifiResetArmedUntil) {
+        wifiResetArmedUntil = millis() + 4000;
+        drawSettingTile(MI_WIFI);
+        break;
+      }
       showBusy("Wi-Fi reset…");
       WiFiManager wm; wm.resetSettings();
       delay(400);
       ESP.restart();
+    } break;
+    case MI_TZ: {
+      // The phone page pre-selects the phone's own zone; Save applies it,
+      // a tap on the screen cancels.
+      bool changed = false;
+      openPhonePage(PORTAL_TIMEZONE, &changed);
+      if (changed) {
+        historyReload();          // calendar days (streak, trend) follow the new zone
+        lastMinute = -1;          // redraw the clock
+      }
+      dirty = true;               // the setup screen covered the UI
     } break;
   }
 }
@@ -2555,6 +2660,9 @@ static void handleTap(int tx, int ty) {
       return;
     case MODE_ACCOUNT:
       handleAccountTap(tx, ty);
+      return;
+    case MODE_FIRMWARE:
+      handleFirmwareTap(tx, ty);
       return;
   }
 
@@ -2626,12 +2734,13 @@ void setup() {
   }
 
   // Show the Wi-Fi setup screen (QR + steps) when the captive portal opens.
-  setWifiPortalCallback([](const char *ap, bool accountOnly) { drawSetup(ap, accountOnly); });
+  setWifiPortalCallback([](const char *ap, PortalKind kind) { drawSetup(ap, kind); });
 
   timeZoneBegin();  // local days for the history's trend, even before NTP
   historyBegin();   // mounts the filesystem (a setup-page sign-in may clear the log)
   cloudBegin();     // the saved account (its email prefills the setup page)
   timeSyncAtBoot(forcePortal);
+  historyReload();  // the setup page may have set the time zone: recount local days
   settingsLoad();   // units / sound / goal / learned scale from NVS
 
   // Just signed in on the setup page: show the outcome, then upload readings
@@ -2690,7 +2799,6 @@ void setup() {
 static uint32_t lastTof = 0;
 static uint32_t lastLiveDraw = 0;
 static uint32_t lastAnim = 0;
-static int lastMinute = -1;
 static long lastDay = -2;
 
 void loop() {
@@ -2699,13 +2807,21 @@ void loop() {
   // restarts before this point is rolled back by the bootloader).
   if (millis() > 30000) otaConfirmHealthy();
 
-  // Serial dev hooks: o=web OTA, u=online update now, p=pull, d=diag, c=calibrate
+  // Serial dev hooks: o=web OTA, u=online update now, b=beta on/off, k=forget a
+  // rolled-back build, p=pull, d=diag, c=calibrate
   // touch, t=raw touch, x=distance sensor, h=history, f=fill demo history (real
   // log backed up), r=restore the real log.
   if (Serial.available()) {
     int c = Serial.read();
     if (c == 'o' || c == 'O') wantOta = true;
     else if (c == 'u' && otaAutoEnabled()) { displayWake(); runUpdate(true); }
+    else if (c == 'k') otaForgetBad();    // allow a rolled-back build again
+    else if (c == 'b') {                  // beta channel on/off: USB only, no button
+      otaSetBeta(!otaBeta());
+      otaIntervalMs = 0;                  // check the new channel at the next chance
+      if (mode == MODE_RAIL && screen == SCR_SETTINGS) drawSettingTile(MI_OTA);
+      else if (mode == MODE_FIRMWARE) dirty = true;
+    }
     else if (c == 'f' && historySeedDemo(nowEpoch()) > 0) {
       if (setGoalKg <= 0) {               // give the ring something to show
         setGoalKg = roundf(historyLast().kg) - 5;
@@ -2896,7 +3012,7 @@ void loop() {
     }
     if (millis() - lastWakeMs > PAIR_MS) closePair();
   }
-  if (mode == MODE_ACCOUNT && millis() - lastWakeMs > 120000) {
+  if ((mode == MODE_ACCOUNT || mode == MODE_FIRMWARE) && millis() - lastWakeMs > 120000) {
     mode = MODE_RAIL;
     screen = SCR_HOME;
     dirty = true;
@@ -2904,7 +3020,7 @@ void loop() {
 
   // Sleep the display after inactivity — never mid weigh-in / result / prompt.
   bool holdAwake = mode == MODE_MEASURE || mode == MODE_RESULT || mode == MODE_CONFIRM ||
-                   mode == MODE_PAIR || mode == MODE_ACCOUNT;
+                   mode == MODE_PAIR || mode == MODE_ACCOUNT || mode == MODE_FIRMWARE;
   if (displayOn && !holdAwake && millis() - lastWakeMs > DISPLAY_TIMEOUT_MS)
     displaySleep();
 
@@ -2935,14 +3051,13 @@ void loop() {
     if (displayOn && mode == MODE_RAIL && screen == SCR_SETTINGS) drawSettingTile(MI_SYNC);
   }
 
-  // Online update: first after boot, then every 12 h (1 h after a failure),
-  // only when nobody is around: the display dark for 10 min. A check blocks the
-  // loop (WiFi + HTTPS), so the display can't wake meanwhile; right after
-  // someone walked away they may well come straight back.
+  // Online update: overnight (otaWindowOpen), at most every 12 h (1 h after a
+  // failure), and only when nobody is around: the display dark for 10 min. A
+  // check blocks the loop (WiFi + HTTPS), so the display can't wake meanwhile.
   bool otaDue = otaIntervalMs ? millis() - lastOtaCheckMs > otaIntervalMs
                               : millis() > OTA_FIRST_CHECK_MS;
   if (otaAutoEnabled() && otaDue && !busy && !displayOn && wifiSavedSsid()[0] &&
-      millis() - sleptAtMs > OTA_IDLE_MS)
+      millis() - sleptAtMs > OTA_IDLE_MS && otaWindowOpen())
     runUpdate(false);
 
   ledUpdate();
@@ -2961,6 +3076,10 @@ void loop() {
         if (clockChanged) { drawHomeClock(); drawHomeHeaderLeft(); }
       } else if (screen == SCR_SETTINGS) {
         if (scaleTileDirty) { drawSettingTile(MI_SCALE); scaleTileDirty = false; }
+        if (wifiResetArmedUntil && millis() >= wifiResetArmedUntil) {   // not confirmed
+          wifiResetArmedUntil = 0;
+          drawSettingTile(MI_WIFI);
+        }
         if (clockChanged) {           // "Synced Xm ago": repaint only if it changed
           char v[32];
           syncStatus(v, sizeof(v));

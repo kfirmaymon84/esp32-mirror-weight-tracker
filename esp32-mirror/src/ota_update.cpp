@@ -19,6 +19,65 @@
 #define OTA_BASE_URL \
   "https://github.com/kfirmaymon84/esp32-mirror-weight-tracker/releases/latest/download"
 #endif
+#ifndef OTA_BETA_URL
+#define OTA_BETA_URL \
+  "https://github.com/kfirmaymon84/esp32-mirror-weight-tracker/releases/download/beta"
+#endif
+static const int OTA_NIGHT_FROM = 2, OTA_NIGHT_TO = 5;      // local hours
+static const uint32_t OTA_MISSED_S = 3 * 86400UL;          // then any idle moment
+
+bool otaBeta() {
+  Preferences p;
+  p.begin("ota", false);
+  bool on = p.isKey("beta") && p.getBool("beta", false);
+  p.end();
+  return on;
+}
+
+void otaSetBeta(bool on) {
+  Preferences p;
+  p.begin("ota", false);
+  p.putBool("beta", on);
+  p.end();
+  Serial.printf("[ota] channel: %s\n", on ? "beta" : "stable");
+}
+
+void otaForgetBad() {
+  Preferences p;
+  p.begin("ota", false);
+  int bad = p.isKey("bad") ? p.getInt("bad", 0) : 0;
+  p.remove("bad");
+  p.end();
+  Serial.printf("[ota] forgot rolled-back build %d\n", bad);
+}
+
+static uint32_t lastCheckEpoch() {
+  Preferences p;
+  p.begin("ota", false);
+  uint32_t t = p.isKey("lastchk") ? p.getUInt("lastchk", 0) : 0;
+  p.end();
+  return t;
+}
+static void setLastCheckEpoch(uint32_t t) {
+  Preferences p;
+  p.begin("ota", false);
+  p.putUInt("lastchk", t);
+  p.end();
+}
+
+bool otaWindowOpen() {
+  if (!timeIsSet()) return true;
+  time_t now = nowEpoch();
+  struct tm tm;
+  localtime_r(&now, &tm);
+  if (tm.tm_hour >= OTA_NIGHT_FROM && tm.tm_hour < OTA_NIGHT_TO) return true;
+  uint32_t last = lastCheckEpoch();
+  if (!last) {                                // first boot: count the 3 days from now
+    setLastCheckEpoch((uint32_t)now);
+    return false;
+  }
+  return (uint32_t)now - last > OTA_MISSED_S;
+}
 
 // Keep a freshly installed image "pending" until otaConfirmHealthy(): by default
 // the Arduino core marks it valid as soon as it boots, defeating the rollback.
@@ -118,26 +177,22 @@ static bool signatureOk(const char *msg, const char *sigB64) {
   return r == 0;
 }
 
-OtaResult otaCheck(OtaRelease &rel) {
-#if !defined(OTA_BOARD)
-  return OTA_FAILED;
-#else
-  if (!wifiConnect(12000)) {
-    Serial.println("[ota] check: no WiFi");
-    return OTA_FAILED;
-  }
-  String url = String(OTA_BASE_URL) + "/" + OTA_BOARD + ".json";
+#if defined(OTA_BOARD)
+// One channel's manifest: AVAILABLE only for a newer, signed, not-rolled-back
+// build for this board.
+static OtaResult checkManifest(const char *base, const char *channel, OtaRelease &rel) {
+  String url = String(base) + "/" + OTA_BOARD + ".json";
   HTTPClient http;
   if (!httpBegin(http, url.c_str())) return OTA_FAILED;
   int code = http.GET();
   String j = code == 200 ? http.getString() : String();
   http.end();
-  if (code == 404) {                        // nothing published for this board yet
-    Serial.println("[ota] check: no release for this board");
+  if (code == 404) {                        // nothing published on this channel yet
+    Serial.printf("[ota] %s: no release for this board\n", channel);
     return OTA_UP_TO_DATE;
   }
   if (code != 200) {
-    Serial.printf("[ota] check: HTTP %d\n", code);
+    Serial.printf("[ota] %s: HTTP %d\n", channel, code);
     return OTA_FAILED;
   }
 
@@ -147,34 +202,58 @@ OtaResult otaCheck(OtaRelease &rel) {
   if (!jsonStr(j, "board", board, sizeof(board)) || !jsonStr(j, "sig", sig, sizeof(sig)) ||
       !jsonStr(j, "sha256", rel.sha256, sizeof(rel.sha256)) ||
       !jsonStr(j, "url", rel.url, sizeof(rel.url)) || rel.build <= 0 || rel.size == 0) {
-    Serial.println("[ota] check: bad manifest");
+    Serial.printf("[ota] %s: bad manifest\n", channel);
     return OTA_FAILED;
   }
   if (!jsonStr(j, "version", rel.version, sizeof(rel.version)))
     snprintf(rel.version, sizeof(rel.version), "%d", rel.build);
   if (strcmp(board, OTA_BOARD) != 0) {
-    Serial.printf("[ota] check: manifest is for '%s', not this board\n", board);
+    Serial.printf("[ota] %s: manifest is for '%s', not this board\n", channel, board);
     return OTA_FAILED;
   }
 
   Preferences p;
-  p.begin("ota", true);
-  int bad = p.getInt("bad", 0);
+  p.begin("ota", false);
+  int bad = p.isKey("bad") ? p.getInt("bad", 0) : 0;
   p.end();
   if (rel.build <= FW_BUILD || rel.build == bad) {
-    Serial.printf("[ota] up to date (running %d, latest %d%s)\n", FW_BUILD, rel.build,
-                  rel.build == bad ? " = rolled back before, skipped" : "");
+    Serial.printf("[ota] %s: up to date (running %d, latest %d%s)\n", channel, FW_BUILD,
+                  rel.build, rel.build == bad ? " = rolled back before, skipped" : "");
     return OTA_UP_TO_DATE;
   }
   char msg[120];
   snprintf(msg, sizeof(msg), "%s:%d:%s", board, rel.build, rel.sha256);
   if (!signatureOk(msg, sig)) {
-    Serial.printf("[ota] build %d: SIGNATURE INVALID - ignored\n", rel.build);
+    Serial.printf("[ota] %s: build %d SIGNATURE INVALID - ignored\n", channel, rel.build);
     return OTA_FAILED;
   }
-  Serial.printf("[ota] build %d (%s) available, %u bytes, signature ok\n", rel.build,
-                rel.version, (unsigned)rel.size);
+  Serial.printf("[ota] %s: build %d (%s) available, %u bytes, signature ok\n", channel,
+                rel.build, rel.version, (unsigned)rel.size);
   return OTA_AVAILABLE;
+}
+#endif
+
+OtaResult otaCheck(OtaRelease &rel) {
+#if !defined(OTA_BOARD)
+  return OTA_FAILED;
+#else
+  if (!wifiConnect(12000)) {
+    Serial.println("[ota] check: no WiFi");
+    return OTA_FAILED;
+  }
+  OtaResult r = checkManifest(OTA_BASE_URL, "stable", rel);
+  if (otaBeta()) {                          // beta: whichever build is newer
+    OtaRelease b;
+    OtaResult rb = checkManifest(OTA_BETA_URL, "beta", b);
+    if (rb == OTA_AVAILABLE && (r != OTA_AVAILABLE || b.build > rel.build)) {
+      rel = b;
+      r = OTA_AVAILABLE;
+    } else if (r == OTA_UP_TO_DATE && rb == OTA_FAILED) {
+      r = OTA_FAILED;                       // couldn't tell: retry sooner
+    }
+  }
+  if (r != OTA_FAILED && timeIsSet()) setLastCheckEpoch((uint32_t)nowEpoch());
+  return r;
 #endif
 }
 

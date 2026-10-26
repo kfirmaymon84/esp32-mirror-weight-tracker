@@ -1,18 +1,24 @@
 """Build, sign and publish firmware for the devices' automatic online updates.
 
-Product units (the OKOK builds, e.g. [env:e32r35t]) check
-  https://github.com/<repo>/releases/latest/download/<board>.json
-and install <board>.bin when its build number is newer and its ECDSA P-256
-signature verifies against the public key compiled into the firmware
-(src/ota_pubkey.h). The private key never leaves this PC (gitignored).
+Devices check GitHub releases of this repo for <board>.json and install
+<board>.bin when its build number is newer and its ECDSA P-256 signature
+verifies against the public key compiled into the firmware (src/ota_pubkey.h).
+The private key never leaves this PC (gitignored).
 
-  py -3 ota/release.py genkey              one time: key pair + src/ota_pubkey.h
-  py -3 ota/release.py build               build + sign every board into ota/release/
-  py -3 ota/release.py build --base-url http://192.168.137.1:8000
-                                           same, with .bin URLs for a local test server
-  py -3 ota/release.py publish             GitHub release v<FW_BUILD> from ota/release/
+Two channels:
+  stable  https://github.com/<repo>/releases/latest/download/<board>.json
+          the newest normal release: what every device gets.
+  beta    https://github.com/<repo>/releases/download/beta/<board>.json
+          one pre-release whose files are replaced each time; devices with
+          devices switched to beta over USB (serial "b") take it, or stable if newer.
 
-Bump FW_BUILD (and FW_VERSION) in src/config.h before every release: devices
+  py -3 ota/release.py genkey     one time: key pair + src/ota_pubkey.h
+  py -3 ota/release.py beta       build + sign every board, publish to the beta channel
+  py -3 ota/release.py promote    publish the current beta files, unchanged, as stable
+  py -3 ota/release.py build [--base-url http://192.168.137.1:8000]
+                                  build + sign into ota/release/ only (local test server)
+
+Bump FW_BUILD (and FW_VERSION) in src/config.h before every beta: devices
 only install a build number higher than their own.
 """
 import base64
@@ -83,7 +89,7 @@ def secrets_strings():
     return [v.encode() for v in vals]
 
 
-def build(base_url):
+def build(base_url, channel="stable"):
     if not os.path.exists(KEY):
         sys.exit("no signing key: run  py -3 ota/release.py genkey  first")
     key = serialization.load_pem_private_key(open(KEY, "rb").read(), password=None)
@@ -100,8 +106,9 @@ def build(base_url):
         sha = hashlib.sha256(data).hexdigest()
         msg = f"{board}:{num}:{sha}".encode()
         sig = key.sign(msg, ec.ECDSA(hashes.SHA256()))
+        tag = "beta" if channel == "beta" else f"v{num}"
         url = (f"{base_url.rstrip('/')}/{board}.bin" if base_url
-               else f"https://github.com/{REPO}/releases/download/v{num}/{board}.bin")
+               else f"https://github.com/{REPO}/releases/download/{tag}/{board}.bin")
         shutil.copyfile(src, os.path.join(OUT, f"{board}.bin"))
         man = {"board": board, "build": num, "version": ver, "size": len(data), "sha256": sha,
                "sig": base64.b64encode(sig).decode(), "url": url}
@@ -111,20 +118,59 @@ def build(base_url):
     print(f"release files in {OUT}")
 
 
-def publish():
+def gh(*args, check=True):
+    return subprocess.run(["gh", *args, "--repo", REPO], check=check)
+
+
+def files():
+    return [os.path.join(OUT, f"{b}.{e}") for b in BOARDS for e in ("bin", "json")]
+
+
+def beta():
+    """Build + sign every board and replace the files of the "beta" pre-release."""
     num, ver = fw_build()
-    files = [os.path.join(OUT, f"{b}.{e}") for b in BOARDS for e in ("bin", "json")]
-    for f in files:
-        if not os.path.exists(f):
-            sys.exit(f"missing {f}: run build first")
-        if f.endswith(".json") and json.load(open(f))["build"] != num:
-            sys.exit(f"{f} is not build {num}: run build again")
-        if f.endswith(".json") and "github.com" not in json.load(open(f))["url"]:
-            sys.exit(f"{f} points at a test server: run build without --base-url")
-    subprocess.run(["gh", "release", "create", f"v{num}", *files, "--repo", REPO,
-                    "--title", f"Firmware {ver}", "--notes",
-                    f"Firmware {ver} (build {num}). Installed automatically by the devices."],
-                   check=True)
+    build("", channel="beta")
+    title = f"Beta: firmware {ver} (build {num})"
+    notes = (f"Beta firmware {ver} (build {num}). Installed by devices with "
+             f"the beta channel (set over USB). Promoted to stable when it has proven itself.")
+    if gh("release", "view", "beta", check=False).returncode != 0:
+        gh("release", "create", "beta", *files(), "--prerelease", "--title", title,
+           "--notes", notes)
+    else:
+        gh("release", "upload", "beta", *files(), "--clobber")
+        gh("release", "edit", "beta", "--prerelease", "--title", title, "--notes", notes)
+    print(f"beta channel: build {num} ({ver})")
+
+
+def promote():
+    """Publish the beta files, byte for byte, as the stable release v<build>."""
+    key = serialization.load_pem_private_key(open(KEY, "rb").read(), password=None)
+    tmp = os.path.join(OUT, "promote")
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp)
+    gh("release", "download", "beta", "--dir", tmp, "--pattern", "*.bin", "--pattern", "*.json")
+    builds = set()
+    out = []
+    for board in BOARDS:
+        man = json.load(open(os.path.join(tmp, f"{board}.json"), encoding="utf-8"))
+        data = open(os.path.join(tmp, f"{board}.bin"), "rb").read()
+        sha = hashlib.sha256(data).hexdigest()
+        if man["board"] != board or man["sha256"] != sha or man["size"] != len(data):
+            sys.exit(f"{board}: beta files don't match their manifest - not promoting")
+        key.public_key().verify(base64.b64decode(man["sig"]),
+                                f"{board}:{man['build']}:{sha}".encode(),
+                                ec.ECDSA(hashes.SHA256()))       # raises if invalid
+        builds.add(man["build"])
+        man["url"] = f"https://github.com/{REPO}/releases/download/v{man['build']}/{board}.bin"
+        with open(os.path.join(tmp, f"{board}.json"), "w", encoding="utf-8", newline="\n") as f:
+            json.dump(man, f, indent=1)
+        out += [os.path.join(tmp, f"{board}.bin"), os.path.join(tmp, f"{board}.json")]
+    if len(builds) != 1:
+        sys.exit(f"beta boards have different builds {sorted(builds)} - not promoting")
+    num, ver = builds.pop(), man["version"]
+    gh("release", "create", f"v{num}", *out, "--latest", "--title", f"Firmware {ver}",
+       "--notes", f"Firmware {ver} (build {num}). Installed automatically by the devices.")
+    print(f"stable channel: build {num} ({ver})")
 
 
 if __name__ == "__main__":
@@ -134,7 +180,9 @@ if __name__ == "__main__":
     elif cmd == "build":
         base = sys.argv[sys.argv.index("--base-url") + 1] if "--base-url" in sys.argv else ""
         build(base)
-    elif cmd == "publish":
-        publish()
+    elif cmd == "beta":
+        beta()
+    elif cmd == "promote":
+        promote()
     else:
         sys.exit(__doc__)

@@ -37,6 +37,5 @@ struct Nearby {
 };
 int nearby(Nearby *out, int max, uint32_t maxAgeMs);
 void setPairing(bool on);
-constexpr bool canPair() { return true; }
 
 }  // namespace OkokScale

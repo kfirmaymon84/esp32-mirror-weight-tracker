@@ -1,21 +1,105 @@
 #include "timekeeper.h"
 
 #include <Arduino.h>
+#include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <esp_wifi.h>
 
 #include "cloud.h"
 #include "config.h"
+#include "timezones.h"
 
-static std::function<void(const char *, bool)> portalCb;
+static std::function<void(const char *, PortalKind)> portalCb;
 static char savedSsid[33] = "";
 static char accountMsg[80] = "";             // result of the account fields, for the UI
 static bool accountOk = false;
 
 const char *wifiSavedSsid() { return savedSsid; }
 
-void setWifiPortalCallback(std::function<void(const char *, bool)> cb) { portalCb = cb; }
+void setWifiPortalCallback(std::function<void(const char *, PortalKind)> cb) { portalCb = cb; }
+
+// ── Time zone (NVS "time"/"tz" = an IANA name from timezones.h) ─────────────
+static int s_tz = -1;                        // index into TZ_ZONES
+
+static int tzFind(const char *iana) {
+  for (int i = 0; i < TZ_COUNT; i++)
+    if (strcmp(TZ_ZONES[i].iana, iana) == 0) return i;
+  return -1;
+}
+static const char *tzPosix() { return s_tz >= 0 ? TZ_ZONES[s_tz].posix : "UTC0"; }
+
+void timeZoneBegin() {
+  Preferences p;
+  p.begin("time", false);
+  String iana = p.isKey("tz") ? p.getString("tz", "") : String();
+  p.end();
+  s_tz = tzFind(iana.length() ? iana.c_str() : TZ_DEFAULT);
+  setenv("TZ", tzPosix(), 1);
+  tzset();
+}
+
+const char *timeZoneCity() { return s_tz >= 0 ? TZ_ZONES[s_tz].city : "UTC"; }
+
+// Switch zone (from the phone page). True if it changed.
+static bool applyTimeZone(const char *iana) {
+  int i = tzFind(iana);
+  if (i < 0 || i == s_tz) return false;
+  s_tz = i;
+  Preferences p;
+  p.begin("time", false);
+  p.putString("tz", iana);
+  p.end();
+  setenv("TZ", tzPosix(), 1);
+  tzset();
+  Serial.printf("[time] time zone: %s (%s)\n", TZ_ZONES[i].iana, TZ_ZONES[i].posix);
+  return true;
+}
+
+// Time-zone field: a list of zones; the page script pre-selects the phone's own
+// zone (exact name, an alias, or else the same UTC offset now). The choice is
+// copied into a hidden field, which is what WiFiManager saves.
+static String timeZoneHtml() {
+  String html;
+  html.reserve(9000);
+  html = "<hr><label for='tzs'><b>Time zone</b> (set from your phone)</label>"
+         "<select id='tzs' onchange=\"document.getElementById('tz').value=this.value\">";
+  for (int i = 0; i < TZ_COUNT; i++) {
+    html += "<option value='";
+    html += TZ_ZONES[i].iana;
+    html += "' data-a='";
+    html += TZ_ZONES[i].aliases;
+    html += "'>";
+    html += TZ_ZONES[i].label;
+    html += "</option>";
+  }
+  html += "</select><script>(function(){var s=document.getElementById('tzs'),"
+          "h=document.getElementById('tz'),o=s.options,z='',i,p=-1;"
+          "try{z=Intl.DateTimeFormat().resolvedOptions().timeZone}catch(e){}"
+          "function off(t){try{var d=new Date(),g={};new Intl.DateTimeFormat('en-US',"
+          "{timeZone:t,hourCycle:'h23',year:'numeric',month:'numeric',day:'numeric',"
+          "hour:'numeric',minute:'numeric'}).formatToParts(d).forEach(function(x){"
+          "g[x.type]=x.value});return Date.UTC(g.year,g.month-1,g.day,g.hour,g.minute)"
+          "-Math.floor(d.getTime()/60000)*60000}catch(e){return null}}"
+          "for(i=0;i<o.length&&p<0;i++)if(o[i].value==z||(' '+o[i].getAttribute('data-a')+"
+          "' ').indexOf(' '+z+' ')>=0)p=i;"
+          "if(p<0&&z){var w=off(z);for(i=0;i<o.length&&p<0;i++)if(off(o[i].value)===w)p=i}"
+          "if(p<0)for(i=0;i<o.length;i++)if(o[i].value==h.value)p=i;"
+          "if(p>=0)s.selectedIndex=p;h.value=s.value})();</script>";
+  return html;
+}
+
+struct TimeZoneField {
+  WiFiManagerParameter value{"tz", "", s_tz >= 0 ? TZ_ZONES[s_tz].iana : TZ_DEFAULT, 40,
+                             "type='hidden'"};
+  String html = timeZoneHtml();              // members initialise in this order
+  WiFiManagerParameter list{html.c_str()};
+  void addTo(WiFiManager &wm) {
+    wm.addParameter(&value);
+    wm.addParameter(&list);
+  }
+  bool apply() { return applyTimeZone(value.getValue()); }
+};
 
 const char *accountSetupMessage(bool *ok) {
   if (ok) *ok = accountOk;
@@ -72,29 +156,42 @@ static void applyAccount(AccountFields &a) {
   Serial.printf("[cloud] setup page: %s\n", accountMsg);
 }
 
-bool accountPortal(std::function<void()> tick) {
-  if (!cloudAvailable()) return false;
+static PortalKind s_portalKind = PORTAL_SETUP;
+
+bool phonePortal(PortalKind kind, std::function<bool()> tick, bool *tzChanged) {
+  if (tzChanged) *tzChanged = false;
+  if (kind == PORTAL_ACCOUNT && !cloudAvailable()) return false;
   WiFiManager wm;
   AccountFields acct;
-  acct.addTo(wm);
+  TimeZoneField tz;
+  if (kind == PORTAL_ACCOUNT) acct.addTo(wm);
+  tz.addTo(wm);
   bool saved = false;
   wm.setSaveParamsCallback([&saved]() { saved = true; });
   std::vector<const char *> menu = {"param", "exit"};      // "Setup" page only
   wm.setMenu(menu);
   wm.setConfigPortalBlocking(false);
+  s_portalKind = kind;
   wm.setAPCallback([](WiFiManager *) {
-    Serial.printf("[wifi] account portal: join '%s', tap Setup\n", WIFI_AP_NAME);
-    if (portalCb) portalCb(WIFI_AP_NAME, true);
+    Serial.printf("[wifi] settings page: join '%s', tap Setup\n", WIFI_AP_NAME);
+    if (portalCb) portalCb(WIFI_AP_NAME, s_portalKind);
   });
   wm.startConfigPortal(WIFI_AP_NAME);
   uint32_t t0 = millis();
   while (!saved && millis() - t0 < 180000) {
     wm.process();
-    if (tick) tick();
+    if (tick && tick()) {                    // cancelled on the device
+      Serial.println("[wifi] settings page cancelled");
+      break;
+    }
     delay(5);
   }
   wm.stopConfigPortal();
-  if (saved) applyAccount(acct);             // connects with the saved network
+  if (saved) {
+    bool changed = tz.apply();
+    if (tzChanged) *tzChanged = changed;
+    if (kind == PORTAL_ACCOUNT) applyAccount(acct);        // connects with the saved network
+  }
   wifiOff();
   return saved;
 }
@@ -120,15 +217,10 @@ void wifiOff() {
 void ntpEnsure(uint32_t waitMs) {
   if (timeIsSet()) return;
   if (WiFi.status() != WL_CONNECTED) return;
-  configTzTime(TZ_INFO, "pool.ntp.org", "time.google.com", "time.windows.com");
+  configTzTime(tzPosix(), "pool.ntp.org", "time.google.com", "time.windows.com");
   uint32_t t0 = millis();
   while (!timeIsSet() && millis() - t0 < waitMs) delay(200);
   if (timeIsSet()) Serial.println("[time] clock backfilled via NTP");
-}
-
-void timeZoneBegin() {
-  setenv("TZ", TZ_INFO, 1);
-  tzset();
 }
 
 bool timeSyncAtBoot(bool forcePortal) {
@@ -149,12 +241,14 @@ bool timeSyncAtBoot(bool forcePortal) {
     // empty = the device runs offline.
     WiFiManager wm;
     AccountFields acct;
+    TimeZoneField tz;
     if (cloudAvailable()) acct.addTo(wm);
+    tz.addTo(wm);
     wm.setConfigPortalTimeout(180);
     wm.setAPCallback([](WiFiManager *w) {
       Serial.printf("[wifi] setup portal: join '%s' then browse 192.168.4.1\n",
                     WIFI_AP_NAME);
-      if (portalCb) portalCb(WIFI_AP_NAME, false);
+      if (portalCb) portalCb(WIFI_AP_NAME, PORTAL_SETUP);
     });
     if (forcePortal) {
       Serial.println("[wifi] forced re-provision (screen held at boot)");
@@ -163,6 +257,7 @@ bool timeSyncAtBoot(bool forcePortal) {
     connected = wm.autoConnect(WIFI_AP_NAME);
     if (connected) {
       strlcpy(savedSsid, WiFi.SSID().c_str(), sizeof(savedSsid));
+      tz.apply();                            // before NTP, so the clock shows local time
       if (cloudAvailable()) applyAccount(acct);
     }
   } else {
@@ -181,7 +276,7 @@ bool timeSyncAtBoot(bool forcePortal) {
 
   Serial.printf("[time] WiFi ok (%s), syncing NTP...\n",
                 WiFi.localIP().toString().c_str());
-  configTzTime(TZ_INFO, "pool.ntp.org", "time.google.com", "time.windows.com");
+  configTzTime(tzPosix(), "pool.ntp.org", "time.google.com", "time.windows.com");
 
   uint32_t t1 = millis();
   while (!timeIsSet() && millis() - t1 < 8000) delay(200);

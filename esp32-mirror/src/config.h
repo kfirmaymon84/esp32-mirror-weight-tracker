@@ -9,14 +9,8 @@
 // Hardware profile (pins, screen size, calibration) for the selected board.
 #include "board.h"
 
-// ── Secrets (personal, gitignored) ──────────────────────────────────────────
-// SCALE_MAC, MI_TOKEN, CLOUD_URL, CLOUD_TOKEN live in secrets.h.
-// Copy secrets.example.h -> secrets.h and fill in your own values.
-#include "secrets.h"
-
 // ── Scale (OKOK / Chipsea BLE broadcast) ────────────────────────────────────
-// Pins live in board.h. The scale needs no keys: the firmware listens for its
-// advertisement and learns the first scale's MAC, or Settings → Scale scans
+// No keys: the firmware learns the first scale heard, or Settings → Scale scans
 // for nearby scales and pairs the one the user picks.
 
 // ── Presence detection (VL53L0X) ────────────────────────────────────────────
@@ -50,26 +44,11 @@
 // First boot with no saved network (or holding a finger on the touch screen at
 // power-on) opens an access point named below; join it with a phone to pick WiFi.
 #define WIFI_AP_NAME  "SmartMirror-Setup"
-// POSIX timezone for Asia/Jerusalem (with DST rules).
-#define TZ_INFO       "IST-2IDT,M3.4.4/26,M10.5.0"
+// Time zone until the user's phone sets one on the setup page (timezones.h).
+#define TZ_DEFAULT    "Asia/Jerusalem"
 
 // ── History / trend ─────────────────────────────────────────────────────────
 #define HISTORY_MAX      400   // readings kept in RAM (> 1 year at one per day)
 #define TREND_WINDOW     7     // moving-average window for trend
 #define TREND_UP_KG      0.5f  // above avg by this → "trending up"
 #define TREND_ALPHA      0.1f  // EWMA trend: daily pull toward the reading (Trends/Home)
-
-// ── Xiaomi S200 user profile (personal -D SCALE_S200 builds only) ───────────
-// Sent during the S200's session setup; the weight readout does not depend on it.
-#ifndef USER_HEIGHT_CM
-#define USER_HEIGHT_CM 177
-#endif
-#ifndef USER_AGE
-#define USER_AGE       33
-#endif
-#ifndef USER_SEX
-#define USER_SEX       1   // 1 = male, 0 = female
-#endif
-
-// ── Cloud sync (Google Apps Script web app) ─────────────────────────────────
-// CLOUD_URL and CLOUD_TOKEN live in secrets.h (gitignored). See secrets.example.h.
